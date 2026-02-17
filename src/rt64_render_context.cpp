@@ -24,6 +24,13 @@ extern uint8_t dmem[];
 // IMEM - not used by HLE but RT64 needs a valid pointer
 uint8_t imem[0x1000];
 
+// RT64 calls this after DP/SP interrupt events
+static void check_interrupts() {
+    // In the recomp runtime, interrupts are handled by ultramodern's event system.
+    // This callback satisfies RT64's requirement but the actual interrupt processing
+    // happens through the ultramodern scheduler.
+}
+
 class RT64Context : public ultramodern::renderer::RendererContext {
 public:
     RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
@@ -58,7 +65,7 @@ public:
         core.VI_V_BURST_REG = &vi_regs->VI_V_BURST_REG;
         core.VI_X_SCALE_REG = &vi_regs->VI_X_SCALE_REG;
         core.VI_Y_SCALE_REG = &vi_regs->VI_Y_SCALE_REG;
-        core.checkInterrupts = nullptr;
+        core.checkInterrupts = check_interrupts;
 
         RT64::ApplicationConfiguration app_config{};
         app_config.appId = "DKRRecompiled";

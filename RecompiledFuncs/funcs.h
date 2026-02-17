@@ -1138,6 +1138,7 @@ void osScRemoveClient(uint8_t* rdram, recomp_context* ctx);
 void osScGetCmdQ(uint8_t* rdram, recomp_context* ctx);
 void osScGetInterruptQ(uint8_t* rdram, recomp_context* ctx);
 void scGetAudioTaskTimers(uint8_t* rdram, recomp_context* ctx);
+void scHandleTasks(uint8_t* rdram, recomp_context* ctx);
 void func_80079760(uint8_t* rdram, recomp_context* ctx);
 void dummy_80079808(uint8_t* rdram, recomp_context* ctx);
 void dummy_80079810(uint8_t* rdram, recomp_context* ctx);

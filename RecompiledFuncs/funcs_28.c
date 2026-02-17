@@ -1,6 +1,18 @@
 #include "recomp.h"
 #include "funcs.h"
 
+RECOMP_FUNC void func_8009D324(uint8_t* rdram, recomp_context* ctx) {
+    uint64_t hi = 0, lo = 0, result = 0;
+    int c1cs = 0;
+    // 0x8009D868: lui         $at, 0x800E
+    ctx->r1 = S32(0X800E << 16);
+    // 0x8009D86C: jr          $ra
+    // 0x8009D870: sb          $zero, -0x5A8($at)
+    MEM_B(-0X5A8, ctx->r1) = 0;
+    return;
+    // 0x8009D870: sb          $zero, -0x5A8($at)
+    MEM_B(-0X5A8, ctx->r1) = 0;
+;}
 RECOMP_FUNC void set_next_taj_challenge_menu(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
@@ -21361,18 +21373,4 @@ L_800A516C:
     return;
     // 0x800A5178: addiu       $sp, $sp, 0x30
     ctx->r29 = ADD32(ctx->r29, 0X30);
-;}
-RECOMP_FUNC void func_800A4C34(uint8_t* rdram, recomp_context* ctx) {
-    uint64_t hi = 0, lo = 0, result = 0;
-    int c1cs = 0;
-    // 0x800A517C: sw          $a0, 0x0($sp)
-    MEM_W(0X0, ctx->r29) = ctx->r4;
-    // 0x800A5180: sw          $a1, 0x4($sp)
-    MEM_W(0X4, ctx->r29) = ctx->r5;
-    // 0x800A5184: jr          $ra
-    // 0x800A5188: sw          $a2, 0x8($sp)
-    MEM_W(0X8, ctx->r29) = ctx->r6;
-    return;
-    // 0x800A5188: sw          $a2, 0x8($sp)
-    MEM_W(0X8, ctx->r29) = ctx->r6;
 ;}

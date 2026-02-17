@@ -1,6 +1,8 @@
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #define WIN32_LEAN_AND_MEAN
@@ -241,37 +243,138 @@ std::filesystem::path get_app_folder_path() {
 }
 
 // -----------------------------------------------
+// ROM loading
+// -----------------------------------------------
+static std::vector<uint8_t> read_rom_file(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return {};
+    auto size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> data(size);
+    file.read(reinterpret_cast<char*>(data.data()), size);
+    return data;
+}
+
+static std::filesystem::path find_rom() {
+    const char* rom_names[] = {
+        "baserom.us.z64",
+        "dkr.z64",
+        "Diddy Kong Racing (U) [!].z64",
+    };
+    // Check current working directory
+    for (const char* name : rom_names) {
+        if (std::filesystem::exists(name)) return name;
+    }
+    // Check next to executable
+    char exe_path_buf[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe_path_buf, MAX_PATH);
+    std::filesystem::path exe_dir = std::filesystem::path(exe_path_buf).parent_path();
+    for (const char* name : rom_names) {
+        auto p = exe_dir / name;
+        if (std::filesystem::exists(p)) return p;
+    }
+    return {};
+}
+
+// -----------------------------------------------
 // Main
 // -----------------------------------------------
+// Crash handler for debugging
+static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
+    fprintf(stderr, "\n[DKR] CRASH at address 0x%p\n", ep->ExceptionRecord->ExceptionAddress);
+    fprintf(stderr, "[DKR] Exception code: 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+        fprintf(stderr, "[DKR] Access violation %s address 0x%p\n",
+            ep->ExceptionRecord->ExceptionInformation[0] == 0 ? "reading" : "writing",
+            (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+    }
+    fprintf(stderr, "[DKR] RIP=0x%p RSP=0x%p\n",
+        (void*)ep->ContextRecord->Rip, (void*)ep->ContextRecord->Rsp);
+    HMODULE hmod = GetModuleHandleA(nullptr);
+    fprintf(stderr, "[DKR] Module base=0x%p, crash offset=0x%llX\n",
+        hmod, (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)hmod));
+    fflush(stderr);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+
 int main(int argc, char* argv[]) {
+    SetUnhandledExceptionFilter(crash_handler);
+    fprintf(stderr, "[DKR] Starting up...\n"); fflush(stderr);
+
     // Windows timer precision
     timeBeginPeriod(1);
 
     // Initialize SDL
+    fprintf(stderr, "[DKR] Initializing SDL...\n"); fflush(stderr);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
+    fprintf(stderr, "[DKR] SDL initialized\n"); fflush(stderr);
 
     // Set up config path
-    recomp::register_config_path(get_app_folder_path());
+    auto app_path = get_app_folder_path();
+    fprintf(stderr, "[DKR] Config path: %s\n", app_path.string().c_str()); fflush(stderr);
+    recomp::register_config_path(app_path);
+
+    // Find and load ROM to compute hash
+    std::filesystem::path rom_path = (argc > 1) ? argv[1] : find_rom();
+    if (rom_path.empty() || !std::filesystem::exists(rom_path)) {
+        MessageBoxA(nullptr,
+            "Could not find ROM file.\n\n"
+            "Place 'baserom.us.z64' (Diddy Kong Racing US v1.1) next to the executable,\n"
+            "or pass the ROM path as a command line argument.",
+            "DKR Recompiled - ROM Not Found", MB_OK | MB_ICONERROR);
+        SDL_Quit();
+        return 1;
+    }
+
+    fprintf(stderr, "[DKR] Loading ROM: %s\n", rom_path.string().c_str()); fflush(stderr);
+    std::vector<uint8_t> rom_data = read_rom_file(rom_path);
+    if (rom_data.empty()) {
+        MessageBoxA(nullptr, "Failed to read ROM file.", "DKR Recompiled - Error", MB_OK | MB_ICONERROR);
+        SDL_Quit();
+        return 1;
+    }
+
+    // Compute XXH3 hash of the ROM
+    uint64_t rom_hash = XXH3_64bits(rom_data.data(), rom_data.size());
+    fprintf(stderr, "[DKR] ROM hash: 0x%016llX\n", (unsigned long long)rom_hash); fflush(stderr);
+
+    // Store the ROM in the config directory for librecomp
+    std::u8string game_id = u8"dkr-us";
+    std::filesystem::path stored_rom_path = app_path / (std::string(game_id.begin(), game_id.end()) + ".z64");
+    {
+        std::ofstream out(stored_rom_path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(rom_data.data()), rom_data.size());
+    }
+    rom_data.clear(); // Free memory
 
     // Register DKR game entry
     recomp::GameEntry dkr_entry{};
-    dkr_entry.rom_hash = 0; // Will be computed from ROM
+    dkr_entry.rom_hash = rom_hash;
     dkr_entry.internal_name = "Diddy Kong Racin";  // First 16 chars from ROM header
-    dkr_entry.game_id = u8"dkr-us";
+    dkr_entry.game_id = game_id;
     dkr_entry.mod_game_id = "dkr-us";
     dkr_entry.save_type = recomp::SaveType::Eep4k;
     dkr_entry.is_enabled = true;
     dkr_entry.has_compressed_code = false;
     dkr_entry.entrypoint_address = (gpr)(int32_t)0x80000400u;
     dkr_entry.entrypoint = recomp_entrypoint;
+    dkr_entry.on_init_callback = [](uint8_t* rdram, recomp_context* ctx) {
+        fprintf(stderr, "[DKR] ROM loaded and init complete, about to call entrypoint\n");
+        fprintf(stderr, "[DKR] RDRAM base: 0x%p\n", rdram);
+        fprintf(stderr, "[DKR] r29(SP): 0x%llX, r8: 0x%llX\n",
+            (unsigned long long)ctx->r29, (unsigned long long)ctx->r8);
+        fflush(stderr);
+    };
 
     recomp::register_game(dkr_entry);
+    fprintf(stderr, "[DKR] Game registered\n"); fflush(stderr);
 
     // Register overlays
     register_overlays();
+    fprintf(stderr, "[DKR] Overlays registered\n"); fflush(stderr);
 
     // Set up callbacks
     recomp::rsp::callbacks_t rsp_callbacks{};
@@ -306,7 +409,19 @@ int main(int argc, char* argv[]) {
     ultramodern::threads::callbacks_t thread_cbs{};
     thread_cbs.get_game_thread_name = get_game_thread_name;
 
-    // Start the recomp runtime
+    fprintf(stderr, "[DKR] All callbacks set up, launching game...\n"); fflush(stderr);
+
+    // Launch a thread to start the game once the runtime is ready
+    std::thread start_thread([&game_id]() {
+        // Wait briefly for recomp::start() to initialize
+        Sleep(1000);
+        fprintf(stderr, "[DKR] Calling start_game...\n"); fflush(stderr);
+        recomp::start_game(game_id);
+    });
+    start_thread.detach();
+
+    // Start the recomp runtime (blocks until game exits)
+    fprintf(stderr, "[DKR] Calling recomp::start()...\n"); fflush(stderr);
     recomp::Configuration config{};
     config.project_version = { 0, 1, 0 };
     config.rsp_callbacks = rsp_callbacks;
