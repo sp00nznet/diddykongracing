@@ -42,19 +42,32 @@ if (MSVC)
 endif()
 
 # Main executable
-add_executable(DKRRecompiled WIN32
+add_executable(DKRRecompiled
     src/main.cpp
     src/register_overlays.cpp
     src/rt64_render_context.cpp
+    src/stubs.cpp
     rsp/aspMain.cpp
 )
 
 target_include_directories(DKRRecompiled PRIVATE
     include
+    RecompiledFuncs
     lib/N64ModernRuntime/ultramodern/include
     lib/N64ModernRuntime/librecomp/include
     lib/N64ModernRuntime/N64Recomp/include
     lib/rt64/src
+    lib/rt64/src/contrib
+    lib/rt64/src/contrib/hlslpp/include
+    lib/rt64/src/contrib/plume
+    lib/rt64/src/contrib/imgui
+    lib/rt64/src/contrib/mupen64plus-core/src/api
+    lib/rt64/src/contrib/xxHash
+    lib/rt64/src/contrib/json
+    lib/rt64/src/contrib/ddspp
+    lib/rt64/src/contrib/dxc/inc
+    lib/rt64/src/rhi
+    lib/rt64/src/render
 )
 
 target_link_libraries(DKRRecompiled PRIVATE
@@ -86,4 +99,7 @@ target_compile_definitions(DKRRecompiled PRIVATE
     DKR_VERSION_MAJOR=0
     DKR_VERSION_MINOR=1
     DKR_VERSION_PATCH=0
+    HLSL_CPU
+    FFX_GCC
+    NOMINMAX
 )

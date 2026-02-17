@@ -7068,7 +7068,7 @@ L_80006E38:
     // 0x80006E40: jal         0x80007FA4
     // 0x80006E44: sw          $v1, 0x44($sp)
     MEM_W(0X44, ctx->r29) = ctx->r3;
-    log(rdram, ctx);
+    log_recomp(rdram, ctx);
         goto after_3;
     // 0x80006E44: sw          $v1, 0x44($sp)
     MEM_W(0X44, ctx->r29) = ctx->r3;
@@ -10373,7 +10373,7 @@ RECOMP_FUNC void racer_sound_check(uint8_t* rdram, recomp_context* ctx) {
     // 0x80007FA0: nop
 
 ;}
-RECOMP_FUNC void log(uint8_t* rdram, recomp_context* ctx) {
+RECOMP_FUNC void log_recomp(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     // 0x80007FA4: lui         $at, 0x3F80

@@ -16,7 +16,12 @@ functions_per_output_file = 50
 # - ignored: all libultra OS/IO/SI/PI/VI/SP functions
 # Only list functions NOT covered by the built-in lists here.
 
-renamed = []
+renamed = [
+    # Conflicts with MSVC runtime _itoa
+    "_itoa",
+    # Conflicts with MSVC math intrinsic log()
+    "log",
+]
 
 # Functions to stub out (replace with empty return)
 stubs = [

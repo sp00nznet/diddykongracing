@@ -5031,12 +5031,7 @@ size = 0x40
 [[section.functions]]
 name = "calc_dyn_lighting_for_level_segment"
 vram = 0x80070B10
-size = 0x134
-
-[[section.functions]]
-name = "func_80070A04"
-vram = 0x80070C44
-size = 0x28
+size = 0x15C
 
 [[section.functions]]
 name = "area_triangle_2d"
