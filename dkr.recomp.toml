@@ -1,0 +1,28 @@
+# Diddy Kong Racing - N64Recomp Configuration
+# ROM: US v1.1 (NDYE, SHA1: 6d96743d46f8c0cd0edb0ec5600b003c89b93755)
+
+[input]
+entrypoint = 0x80000400
+symbols_file_path = "dkr.us.syms.toml"
+rom_file_path = "baserom.us.z64"
+output_func_path = "RecompiledFuncs"
+single_file_output = false
+functions_per_output_file = 50
+
+[patches]
+# N64Recomp's built-in symbol lists automatically handle:
+# - renamed: sinf, cosf, sqrtf, memcpy, memset, bcopy, sprintf, etc.
+# - reimplemented: osCreateThread, osSendMesg, __ll_div, etc.
+# - ignored: all libultra OS/IO/SI/PI/VI/SP functions
+# Only list functions NOT covered by the built-in lists here.
+
+renamed = []
+
+# Functions to stub out (replace with empty return)
+stubs = [
+    # Uses cop0 WatchLo register (mtc0 reg, 18) - N64 debug hardware
+    "set_breakpoint",
+]
+
+# Functions to ignore completely
+ignored = []
