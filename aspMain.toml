@@ -1,0 +1,8 @@
+# DKR Audio RSP Microcode Recompilation Config
+rom_file_path = "baserom.us.z64"
+output_file_path = "rsp/aspMain.cpp"
+output_function_name = "aspMain"
+# aspMain text: ROM 0xD8760, next textbin (rspboot) at 0xD9620 -> size 0xEC0
+text_offset = 0xD8760
+text_size = 0xEC0
+text_address = 0x04001000
