@@ -8,6 +8,7 @@
 #include <timeapi.h>
 
 #include <SDL.h>
+#include <SDL_syswm.h>
 
 #include "recomp.h"
 #include "librecomp/game.hpp"
@@ -24,8 +25,8 @@ extern void register_overlays();
 std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_context(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
 
-// RSP microcode
-extern "C" RspExitReason aspMain(uint8_t* rdram, uint32_t ucode_addr);
+// RSP microcode (C++ linkage - matches aspMain.cpp)
+RspExitReason aspMain(uint8_t* rdram, uint32_t ucode_addr);
 
 // xxHash3 for ROM hash computation
 #include "xxHash/xxh3.h"

@@ -1,6 +1,11 @@
 #include <memory>
 #include <cstdio>
 
+#ifdef _WIN32
+#include <Windows.h>
+#include <unknwn.h>
+#endif
+
 #include "ultramodern/renderer_context.hpp"
 #include "hle/rt64_application.h"
 
@@ -14,16 +19,18 @@ static uint32_t DPC_BUFBUSY_REG = 0;
 static uint32_t DPC_PIPEBUSY_REG = 0;
 static uint32_t DPC_TMEM_REG = 0;
 
+// Defined in librecomp/src/rsp.cpp
 extern uint8_t dmem[];
-extern uint8_t imem[];
-
-static ultramodern::renderer::ViRegs vi_regs{};
+// IMEM - not used by HLE but RT64 needs a valid pointer
+uint8_t imem[0x1000];
 
 class RT64Context : public ultramodern::renderer::RendererContext {
 public:
     RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
+        auto* vi_regs = ultramodern::renderer::get_vi_regs();
+
         RT64::Application::Core core{};
-        core.window = RT64::RenderWindow(window_handle.window);
+        core.window = window_handle.window;
         core.HEADER = rdram;
         core.RDRAM = rdram;
         core.DMEM = dmem;
@@ -37,20 +44,20 @@ public:
         core.DPC_BUFBUSY_REG = &DPC_BUFBUSY_REG;
         core.DPC_PIPEBUSY_REG = &DPC_PIPEBUSY_REG;
         core.DPC_TMEM_REG = &DPC_TMEM_REG;
-        core.VI_STATUS_REG = &vi_regs.VI_STATUS_REG;
-        core.VI_ORIGIN_REG = &vi_regs.VI_ORIGIN_REG;
-        core.VI_WIDTH_REG = &vi_regs.VI_WIDTH_REG;
-        core.VI_INTR_REG = &vi_regs.VI_INTR_REG;
-        core.VI_V_CURRENT_LINE_REG = &vi_regs.VI_V_CURRENT_LINE_REG;
-        core.VI_TIMING_REG = &vi_regs.VI_TIMING_REG;
-        core.VI_V_SYNC_REG = &vi_regs.VI_V_SYNC_REG;
-        core.VI_H_SYNC_REG = &vi_regs.VI_H_SYNC_REG;
-        core.VI_LEAP_REG = &vi_regs.VI_LEAP_REG;
-        core.VI_H_START_REG = &vi_regs.VI_H_START_REG;
-        core.VI_V_START_REG = &vi_regs.VI_V_START_REG;
-        core.VI_V_BURST_REG = &vi_regs.VI_V_BURST_REG;
-        core.VI_X_SCALE_REG = &vi_regs.VI_X_SCALE_REG;
-        core.VI_Y_SCALE_REG = &vi_regs.VI_Y_SCALE_REG;
+        core.VI_STATUS_REG = &vi_regs->VI_STATUS_REG;
+        core.VI_ORIGIN_REG = &vi_regs->VI_ORIGIN_REG;
+        core.VI_WIDTH_REG = &vi_regs->VI_WIDTH_REG;
+        core.VI_INTR_REG = &vi_regs->VI_INTR_REG;
+        core.VI_V_CURRENT_LINE_REG = &vi_regs->VI_V_CURRENT_LINE_REG;
+        core.VI_TIMING_REG = &vi_regs->VI_TIMING_REG;
+        core.VI_V_SYNC_REG = &vi_regs->VI_V_SYNC_REG;
+        core.VI_H_SYNC_REG = &vi_regs->VI_H_SYNC_REG;
+        core.VI_LEAP_REG = &vi_regs->VI_LEAP_REG;
+        core.VI_H_START_REG = &vi_regs->VI_H_START_REG;
+        core.VI_V_START_REG = &vi_regs->VI_V_START_REG;
+        core.VI_V_BURST_REG = &vi_regs->VI_V_BURST_REG;
+        core.VI_X_SCALE_REG = &vi_regs->VI_X_SCALE_REG;
+        core.VI_Y_SCALE_REG = &vi_regs->VI_Y_SCALE_REG;
         core.checkInterrupts = nullptr;
 
         RT64::ApplicationConfiguration app_config{};
@@ -85,12 +92,10 @@ public:
 
     bool update_config(const ultramodern::renderer::GraphicsConfig& old_config,
                        const ultramodern::renderer::GraphicsConfig& new_config) override {
-        // TODO: Update RT64 configuration
         return true;
     }
 
     void enable_instant_present() override {
-        // TODO: Implement
     }
 
     void send_dl(const OSTask* task) override {
@@ -98,7 +103,7 @@ public:
             app->core.RDRAM,
             task->t.data_ptr,
             task->t.data_size,
-            true // HLE
+            true
         );
     }
 
@@ -125,12 +130,4 @@ private:
 std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_context(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
     return std::make_unique<RT64Context>(rdram, window_handle, developer_mode);
-}
-
-namespace ultramodern {
-    namespace renderer {
-        ViRegs* get_vi_regs() {
-            return &vi_regs;
-        }
-    }
 }
