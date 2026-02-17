@@ -5676,7 +5676,12 @@ size = 0x8
 [[section.functions]]
 name = "scGetAudioTaskTimers"
 vram = 0x800799D4
-size = 0x1DC
+size = 0x28
+
+[[section.functions]]
+name = "scHandleTasks"
+vram = 0x800799FC
+size = 0x1B4
 
 [[section.functions]]
 name = "func_80079760"
