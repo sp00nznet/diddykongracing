@@ -10,6 +10,7 @@
 // ============================================================
 static F3DDKRState g_state;
 static bool g_initialized = false;
+static bool g_dl_trace = false;
 
 // Log first N occurrences of each opcode
 static constexpr int LOG_FIRST_N = 3;
@@ -105,9 +106,19 @@ static inline void rgba5551_to_rgba8888(uint16_t c, uint8_t& r, uint8_t& g, uint
 // Write a pixel to the framebuffer, using the current color image settings
 static int g_pixel_write_count = 0;
 
+static int g_fb_write_log_count = 0;
+
 static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     if (g_state.ci_addr == 0) return;
     if (x < g_state.sc_xl || x >= g_state.sc_xh || y < g_state.sc_yl || y >= g_state.sc_yh) return;
+
+    // Log first few non-black pixel writes for debugging
+    if (g_dl_trace && g_fb_write_log_count < 10 && (r > 4 || g > 4 || b > 4)) {
+        fprintf(stderr, "[TRACE] PIXEL @(%d,%d) rgba=(%d,%d,%d,%d) ci=0x%06X\n",
+                x, y, r, g, b, a, g_state.ci_addr);
+        fflush(stderr);
+        g_fb_write_log_count++;
+    }
 
     if (g_state.ci_size == SIZ_16b) {
         uint16_t pixel = rgba8888_to_rgba5551(r, g, b, a);
@@ -203,6 +214,13 @@ static void cmd_fill_rect(uint32_t w0, uint32_t w1) {
 // ============================================================
 static int g_mtx_log_count = 0;
 
+// Force a test matrix for debugging: simple scale+translate that maps
+// vertex range (-400..400) to screen (0..320, 0..237)
+// With vp_scale=(160,120), vp_trans=(160,120):
+//   sx = cx/cw * 160 + 160 => for cx=x, cw=640: sx = x/4 + 160
+//   sy = cy/cw * 120 + 120 => for cy=y, cw=640: sy = 3y/16 + 120
+static constexpr bool FORCE_TEST_MATRIX = false;
+
 static void load_matrix(uint32_t rdram_addr, int index) {
     if (index < 0 || index > 2) return;
     uint32_t phys = addr_to_phys(rdram_addr);
@@ -220,41 +238,97 @@ static void load_matrix(uint32_t rdram_addr, int index) {
         }
     }
 
+    // Override with test matrix if enabled (only for 3D matrices, not the ortho overlay)
+    if (FORCE_TEST_MATRIX && index <= 1) {
+        // Check if this looks like the orthographic overlay matrix (m[0][0]==1, m[3][3]>=100)
+        bool is_ortho = (fabsf(g_state.matrices[index][0][0] - 1.0f) < 0.1f &&
+                        g_state.matrices[index][3][3] > 50.0f);
+        if (!is_ortho) {
+            // Replace with simple perspective: cw = -z (perspective divide)
+            // With vp scale (160,120) and translate (160,120):
+            //   sx = cx/cw * 160 + 160, sy = cy/cw * 120 + 120
+            // Using m[0][0]=0.5, m[1][1]=0.6, m[2][3]=-1, m[3][2]=-20
+            memset(g_state.matrices[index], 0, sizeof(g_state.matrices[index]));
+            g_state.matrices[index][0][0] = 0.5f;    // x scale
+            g_state.matrices[index][1][1] = 0.6f;    // y scale (wider for aspect)
+            g_state.matrices[index][2][2] = -1.002f;  // near/far factor
+            g_state.matrices[index][2][3] = -1.0f;    // perspective flag
+            g_state.matrices[index][3][2] = -20.0f;   // near*far factor
+            // cw = -z, so for z=-200, cw=200
+            // cx = 0.5*x, sx = (0.5*x)/(-z) * 160 + 160
+            // For vertex (161, 218, -153): cx=80.5, cw=153, sx=80.5/153*160+160=244
+            // For vertex (0, 249, 0): cw=0, degenerate - OK
+        }
+    }
+
     // Check if matrix is non-degenerate (has non-zero diagonal)
     float diag_sum = fabsf(g_state.matrices[index][0][0]) + fabsf(g_state.matrices[index][1][1]) +
                      fabsf(g_state.matrices[index][2][2]) + fabsf(g_state.matrices[index][3][3]);
-    static bool logged_nonzero = false;
-    if (diag_sum > 0.1f && !logged_nonzero) {
-        fprintf(stderr, "[F3DDKR] *** FIRST NON-DEGENERATE MTX[%d] at 0x%06X (diag=%.2f):\n", index, phys, diag_sum);
-        for (int i = 0; i < 4; i++) {
-            fprintf(stderr, "  [%10.4f %10.4f %10.4f %10.4f]\n",
-                    g_state.matrices[index][i][0], g_state.matrices[index][i][1],
-                    g_state.matrices[index][i][2], g_state.matrices[index][i][3]);
+    static int total_mtx_loads = 0;
+    static int nonzero_count = 0;
+    static int nonzero_logged = 0;
+    total_mtx_loads++;
+    if (diag_sum > 0.1f) {
+        nonzero_count++;
+        if (nonzero_logged < 5) {
+            fprintf(stderr, "[F3DDKR] NON-DEGENERATE MTX[%d] (#%d) at 0x%06X DL#%d (diag=%.2f):\n",
+                    index, nonzero_logged + 1, phys, g_state.dl_total_count, diag_sum);
+            for (int i = 0; i < 4; i++) {
+                fprintf(stderr, "  [%12.4f %12.4f %12.4f %12.4f]\n",
+                        g_state.matrices[index][i][0], g_state.matrices[index][i][1],
+                        g_state.matrices[index][i][2], g_state.matrices[index][i][3]);
+            }
+            fflush(stderr);
+            nonzero_logged++;
         }
+    }
+    // Log summary of matrix loads every 200 loads and on specific DLs
+    if (total_mtx_loads % 200 == 0) {
+        fprintf(stderr, "[F3DDKR] MTX stats: %d loads, %d non-degenerate (DL#%d)\n",
+                total_mtx_loads, nonzero_count, g_state.dl_total_count);
         fflush(stderr);
-        logged_nonzero = true;
+    }
+    // Dump raw bytes for a later matrix (DL 50-55) to check if data is still zero
+    if (g_state.dl_total_count >= 50 && g_state.dl_total_count <= 55 && total_mtx_loads > 10) {
+        static int late_dump_count = 0;
+        if (late_dump_count < 3) {
+            fprintf(stderr, "[F3DDKR] LATE MTX[%d] at DL#%d phys=0x%06X diag=%.4f:\n  INT: ",
+                    index, g_state.dl_total_count, phys, diag_sum);
+            for (int w = 0; w < 8; w++)
+                fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + w * 4));
+            fprintf(stderr, "\n  FRC: ");
+            for (int w = 0; w < 8; w++)
+                fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + 32 + w * 4));
+            fprintf(stderr, "\n  Parsed: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] ...\n",
+                    g_state.matrices[index][0][0], g_state.matrices[index][0][1],
+                    g_state.matrices[index][0][2], g_state.matrices[index][0][3],
+                    g_state.matrices[index][1][0], g_state.matrices[index][1][1],
+                    g_state.matrices[index][1][2], g_state.matrices[index][1][3]);
+            fflush(stderr);
+            late_dump_count++;
+        }
     }
 
-    // Log first few matrices
-    if (g_mtx_log_count < 4) {
-        fprintf(stderr, "[F3DDKR] MTX[%d] loaded from 0x%06X:\n", index, phys);
-        // Dump raw 32-bit words for debugging
-        fprintf(stderr, "  Raw int halves (32B): ");
-        for (int k = 0; k < 8; k++) {
-            uint32_t w = rdram_read_u32(g_state.rdram, phys + k * 4);
-            fprintf(stderr, "%08X ", w);
-        }
-        fprintf(stderr, "\n  Raw frac halves (32B): ");
-        for (int k = 0; k < 8; k++) {
-            uint32_t w = rdram_read_u32(g_state.rdram, phys + 32 + k * 4);
-            fprintf(stderr, "%08X ", w);
-        }
-        fprintf(stderr, "\n  Decoded matrix:\n");
+    // Log first few matrices with full detail + raw bytes
+    if (g_mtx_log_count < 3) {
+        fprintf(stderr, "[F3DDKR] MTX[%d] from 0x%06X diag=(%.2f,%.2f,%.2f,%.2f):\n", index, phys,
+                g_state.matrices[index][0][0], g_state.matrices[index][1][1],
+                g_state.matrices[index][2][2], g_state.matrices[index][3][3]);
         for (int i = 0; i < 4; i++) {
             fprintf(stderr, "  [%10.4f %10.4f %10.4f %10.4f]\n",
                     g_state.matrices[index][i][0], g_state.matrices[index][i][1],
                     g_state.matrices[index][i][2], g_state.matrices[index][i][3]);
         }
+        // Dump raw 64 bytes (as 32-bit words) for debugging
+        fprintf(stderr, "[F3DDKR] MTX raw 64 bytes at phys=0x%06X:\n  INT: ", phys);
+        for (int w = 0; w < 8; w++) {
+            fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + w * 4));
+        }
+        fprintf(stderr, "\n  FRC: ");
+        for (int w = 0; w < 8; w++) {
+            fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + 32 + w * 4));
+        }
+        fprintf(stderr, "\n");
         fflush(stderr);
         g_mtx_log_count++;
     }
@@ -275,6 +349,16 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
     }
 
     load_matrix(addr, index);
+
+    if (g_dl_trace) {
+        fprintf(stderr, "[TRACE] G_MTX slot=%d addr=0x%06X:\n", index, addr_to_phys(addr));
+        for (int r = 0; r < 4; r++) {
+            fprintf(stderr, "  [%10.4f %10.4f %10.4f %10.4f]\n",
+                    g_state.matrices[index][r][0], g_state.matrices[index][r][1],
+                    g_state.matrices[index][r][2], g_state.matrices[index][r][3]);
+        }
+        fflush(stderr);
+    }
 }
 
 // ============================================================
@@ -283,10 +367,12 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
 static void transform_vertex(float x, float y, float z, int mat_idx,
                               float& cx, float& cy, float& cz, float& cw) {
     const float (*m)[4] = g_state.matrices[mat_idx];
-    cx = m[0][0]*x + m[0][1]*y + m[0][2]*z + m[0][3];
-    cy = m[1][0]*x + m[1][1]*y + m[1][2]*z + m[1][3];
-    cz = m[2][0]*x + m[2][1]*y + m[2][2]*z + m[2][3];
-    cw = m[3][0]*x + m[3][1]*y + m[3][2]*z + m[3][3];
+    // N64 row-vector convention: clip = [x, y, z, 1] * matrix
+    // result[j] = sum_i(vertex[i] * matrix[i][j])
+    cx = m[0][0]*x + m[1][0]*y + m[2][0]*z + m[3][0];
+    cy = m[0][1]*x + m[1][1]*y + m[2][1]*z + m[3][1];
+    cz = m[0][2]*x + m[1][2]*y + m[2][2]*z + m[3][2];
+    cw = m[0][3]*x + m[1][3]*y + m[2][3]*z + m[3][3];
 }
 
 static void cmd_vtx(uint32_t w0, uint32_t w1) {
@@ -330,14 +416,6 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
         tv.b = vb;
         tv.a = va;
 
-        // Log first few vertices
-        if (g_state.cmd_counts[F3DDKR_G_VTX] <= 2 && i < 3) {
-            fprintf(stderr, "[F3DDKR] VTX[%d]: raw=(%d,%d,%d) RGBA=(%d,%d,%d,%d) mtx=%d\n",
-                    start_idx + i, vx, vy, vz, vr, vg, vb, va,
-                    g_state.active_matrix_index);
-            fflush(stderr);
-        }
-
         // Transform by active matrix
         transform_vertex((float)vx, (float)vy, (float)vz, g_state.active_matrix_index,
                          tv.cx, tv.cy, tv.cz, tv.cw);
@@ -352,7 +430,6 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
         }
 
         // Perspective divide to screen space using N64 viewport transform
-        // sx = cx/cw * vscale_x + vtrans_x (preserves viewport sign!)
         if (fabsf(tv.cw) > 0.0001f) {
             float inv_w = 1.0f / tv.cw;
             tv.sx = tv.cx * inv_w * g_state.vp_scale_x + g_state.vp_trans_x;
@@ -360,6 +437,14 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
         } else {
             tv.sx = 0;
             tv.sy = 0;
+        }
+
+        // DL trace: log first few vertices with transform results + color
+        if (g_dl_trace && i < 3) {
+            fprintf(stderr, "[TRACE] VTX[%d]: raw=(%d,%d,%d) rgba=(%d,%d,%d,%d) mtx=%d clip=(%.2f,%.2f,%.2f,%.2f) screen=(%.1f,%.1f)\n",
+                    start_idx + i, vx, vy, vz, vr, vg, vb, va, g_state.active_matrix_index,
+                    tv.cx, tv.cy, tv.cz, tv.cw, tv.sx, tv.sy);
+            fflush(stderr);
         }
         loaded++;
     }
@@ -909,16 +994,22 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
         const TransformedVertex& v1 = g_state.vertex_buffer[vi1];
         const TransformedVertex& v2 = g_state.vertex_buffer[vi2];
 
-        // Log first few triangles for debugging
-        if (g_state.tri_total_count < 5) {
-            fprintf(stderr, "[F3DDKR] TRI#%d: vi=%d,%d,%d flags=0x%02X tex=%d "
+        g_state.tri_total_count++;
+        // Log first few triangles + first few from DL #11+ (when matrix is non-degenerate)
+        bool is_nondegen = (v0.sx != v1.sx || v0.sy != v1.sy || v1.sx != v2.sx || v1.sy != v2.sy);
+        static int nondegen_logged = 0;
+        static int late_tri_logged = 0;
+        bool is_late_tri = (g_state.dl_total_count >= 11 && late_tri_logged < 8);
+        if (g_state.tri_total_count <= 5 || (is_nondegen && nondegen_logged < 10) || is_late_tri) {
+            fprintf(stderr, "[F3DDKR] TRI#%d DL#%d: vi=%d,%d,%d flags=0x%02X tex=%d "
                     "screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) cw=%.1f,%.1f,%.1f\n",
-                    g_state.tri_total_count, vi0, vi1, vi2, flags, tex_enabled,
+                    g_state.tri_total_count, g_state.dl_total_count, vi0, vi1, vi2, flags, tex_enabled,
                     v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy,
                     v0.cw, v1.cw, v2.cw);
             fflush(stderr);
+            if (is_nondegen) nondegen_logged++;
+            if (is_late_tri) late_tri_logged++;
         }
-        g_state.tri_total_count++;
 
         // Skip if any vertex is behind camera (w <= 0)
         if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
@@ -1032,10 +1123,12 @@ static void cmd_setcimg(uint32_t w0, uint32_t w1) {
     g_state.ci_format = (w0 >> 21) & 0x7;
     g_state.ci_size = (w0 >> 19) & 0x3;
     g_state.ci_width = (w0 & 0xFFF) + 1;
+    uint32_t old_ci = g_state.ci_addr;
     g_state.ci_addr = resolve_segment(w1);
+    // Log CI changes only for first few
     if (g_state.cmd_counts[F3DDKR_G_SETCIMG] < LOG_FIRST_N) {
-        fprintf(stderr, "[F3DDKR] G_SETCIMG (0xFF): w1=0x%08X -> phys=0x%06X fmt=%d siz=%d w=%d\n",
-                w1, g_state.ci_addr, g_state.ci_format, g_state.ci_size, g_state.ci_width);
+        fprintf(stderr, "[F3DDKR] G_SETCIMG: phys=0x%06X (was 0x%06X) fmt=%d siz=%d w=%d\n",
+                g_state.ci_addr, old_ci, g_state.ci_format, g_state.ci_size, g_state.ci_width);
         fflush(stderr);
     }
     g_state.cmd_counts[F3DDKR_G_SETCIMG]++;
@@ -1062,10 +1155,14 @@ static void cmd_moveword(uint32_t w0, uint32_t w1) {
             break;
         case F3DDKR_MW_MVPMATRIX:
             g_state.active_matrix_index = (w1 >> 6) & 0x3;
-            // Always log matrix selection
-            fprintf(stderr, "[F3DDKR] G_MOVEWORD(matrix): active_matrix=%d (w1=0x%08X)\n",
-                    g_state.active_matrix_index, w1);
-            fflush(stderr);
+            log_cmd(F3DDKR_G_MOVEWORD, "G_MOVEWORD(matrix)", w0, w1);
+            if (g_dl_trace) {
+                int mi = g_state.active_matrix_index;
+                float d = fabsf(g_state.matrices[mi][0][0]) + fabsf(g_state.matrices[mi][1][1]) +
+                          fabsf(g_state.matrices[mi][2][2]) + fabsf(g_state.matrices[mi][3][3]);
+                fprintf(stderr, "[TRACE] SELECT MTX=%d (w1=0x%08X) diag=%.2f\n", mi, w1, d);
+                fflush(stderr);
+            }
             break;
         case F3DDKR_MW_SEGMENT: {
             int seg = offset / 4;
@@ -1112,6 +1209,11 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 log_cmd(op, "G_DL", w0, w1);
                 uint8_t push = (w0 >> 16) & 0xFF;
                 uint32_t sub_addr = resolve_segment(w1);
+                if (g_dl_trace) {
+                    fprintf(stderr, "[TRACE] G_DL: push=%d addr=0x%06X (depth=%d)\n",
+                            push, sub_addr, g_state.dl_stack_depth);
+                    fflush(stderr);
+                }
                 if (push == 0) {
                     // Push: recurse, then continue
                     if (g_state.dl_stack_depth < F3DDKRState::MAX_DL_STACK) {
@@ -1131,6 +1233,11 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 log_cmd(op, "G_DMADL", w0, w1);
                 int num_cmds = (w0 >> 16) & 0xFF;
                 uint32_t sub_addr = addr_to_phys(w1);
+                if (g_dl_trace) {
+                    fprintf(stderr, "[TRACE] G_DMADL: %d cmds at 0x%06X (depth=%d)\n",
+                            num_cmds, sub_addr, g_state.dl_stack_depth);
+                    fflush(stderr);
+                }
                 if (g_state.dl_stack_depth < F3DDKRState::MAX_DL_STACK) {
                     g_state.dl_stack_depth++;
                     process_dl_recursive(rdram, sub_addr, num_cmds);
@@ -1407,11 +1514,41 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
     uint32_t phys = addr_to_phys(dl_addr);
 
     g_state.dl_total_count++;
+
+    // Enable trace for DL #100 (a representative DL with geometry)
+    g_dl_trace = (g_state.dl_total_count == 100);
+    if (g_dl_trace) g_fb_write_log_count = 0;
+
     if (g_state.dl_total_count <= 5 || (g_state.dl_total_count <= 100 && g_state.dl_total_count % 20 == 0)) {
         fprintf(stderr, "[F3DDKR] Processing DL #%d: addr=0x%08X (phys=0x%06X) size=0x%X\n",
                 g_state.dl_total_count, dl_addr, phys, dl_size);
         fflush(stderr);
     }
 
+    int tri_before = g_state.tri_total_count;
+    int pix_before = g_pixel_write_count;
+
     process_dl_recursive(rdram, phys, 0);
+
+    int tri_this_dl = g_state.tri_total_count - tri_before;
+    int pix_this_dl = g_pixel_write_count - pix_before;
+
+    // Periodic summary every 50 DLs
+    if (g_state.dl_total_count % 50 == 0) {
+        fprintf(stderr, "[F3DDKR] === DL #%d summary: total_tris=%d total_pixels=%d ci=0x%06X "
+                "vp_scale=(%.0f,%.0f) active_mtx=%d ===\n",
+                g_state.dl_total_count, g_state.tri_total_count, g_pixel_write_count,
+                g_state.ci_addr, g_state.vp_scale_x, g_state.vp_scale_y,
+                g_state.active_matrix_index);
+        fflush(stderr);
+    }
+
+    // Log DLs that draw significant content
+    if (tri_this_dl > 0 || pix_this_dl > 100) {
+        if (g_state.dl_total_count > 10) { // skip early DLs (already logged)
+            fprintf(stderr, "[F3DDKR] DL #%d drew %d tris, %d pixels (ci=0x%06X)\n",
+                    g_state.dl_total_count, tri_this_dl, pix_this_dl, g_state.ci_addr);
+            fflush(stderr);
+        }
+    }
 }

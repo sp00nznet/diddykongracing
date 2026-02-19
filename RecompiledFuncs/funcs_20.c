@@ -6,6 +6,8 @@ RECOMP_FUNC void coss_s16(uint8_t* rdram, recomp_context* ctx) {
     int c1cs = 0;
     // 0x80070A6C: addiu       $a0, $a0, 0x4000
     ctx->r4 = ADD32(ctx->r4, 0X4000);
+    // FIX: Original MIPS falls through to sins_s16 - recompiler missed this
+    sins_s16(rdram, ctx);
 ;}
 RECOMP_FUNC void sins_s16(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -76,6 +78,8 @@ RECOMP_FUNC void coss_2(uint8_t* rdram, recomp_context* ctx) {
     int c1cs = 0;
     // 0x80070ACC: addiu       $a0, $a0, 0x4000
     ctx->r4 = ADD32(ctx->r4, 0X4000);
+    // FIX: Original MIPS falls through to sins_2 - recompiler missed this
+    sins_2(rdram, ctx);
 ;}
 RECOMP_FUNC void sins_2(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
