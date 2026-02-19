@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -194,6 +195,42 @@ public:
         }
 
         SDL_UpdateWindowSurface(window_);
+
+        // Periodically log framebuffer content check
+        if (screen_count_ <= 5 || screen_count_ == 100 || screen_count_ == 200 || screen_count_ % 500 == 0) {
+            // Scan entire framebuffer for non-fill pixels
+            int non_fill = 0;
+            int non_zero = 0;
+            uint16_t first_nonfill_val = 0;
+            int first_nonfill_x = -1, first_nonfill_y = -1;
+            if (pixel_size == 2) {
+                for (uint32_t y = 0; y < screen_height; y++) {
+                    for (uint32_t x = 0; x < screen_width; x++) {
+                        uint32_t off = fb_offset + (y * screen_width + x) * 2;
+                        if (off + 1 >= 0x800000) break;
+                        uint8_t hi = rdram_[off ^ 3];
+                        uint8_t lo = rdram_[(off + 1) ^ 3];
+                        uint16_t px = (hi << 8) | lo;
+                        if (px != 0) non_zero++;
+                        if (px > 0x0001 && px != 0xFFFC) { // not zero, not fill black (0x0001), not z-fill (0xFFFC)
+                            non_fill++;
+                            if (non_fill == 1) {
+                                first_nonfill_val = px;
+                                first_nonfill_x = x;
+                                first_nonfill_y = y;
+                            }
+                        }
+                    }
+                }
+            }
+            fprintf(stderr, "[DKR-GFX] FB check screen#%d: origin=0x%06X %ux%u non_zero=%d non_fill=%d",
+                    screen_count_, fb_offset, screen_width, screen_height, non_zero, non_fill);
+            if (first_nonfill_x >= 0) {
+                fprintf(stderr, " first=0x%04X@(%d,%d)", first_nonfill_val, first_nonfill_x, first_nonfill_y);
+            }
+            fprintf(stderr, "\n");
+            fflush(stderr);
+        }
     }
 
     void shutdown() override {

@@ -114,12 +114,26 @@ void poll_input() {
     }
 }
 
+// Auto-advance: simulate Start/A presses to get past boot screens
+static uint32_t input_start_ticks = 0;
+
 bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     if (controller_num != 0) return false;
 
     *buttons = 0;
     *x = 0.0f;
     *y = 0.0f;
+
+    // Auto-press Start/A to advance past boot screens
+    // DKR boot: Nintendo logo (~3s) → Rareware logo (~3s) → title screen (needs Start)
+    if (input_start_ticks == 0) input_start_ticks = SDL_GetTicks();
+    uint32_t elapsed_ms = SDL_GetTicks() - input_start_ticks;
+    auto auto_press = [&](uint32_t at_ms, uint16_t btn) {
+        if (elapsed_ms >= at_ms && elapsed_ms < at_ms + 200) *buttons |= btn;
+    };
+    auto_press(4000, 0x1000);  // Start at 4s (skip Nintendo logo)
+    auto_press(8000, 0x1000);  // Start at 8s (skip Rareware logo)
+    auto_press(12000, 0x1000); // Start at 12s (advance title screen)
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 
