@@ -1,6 +1,84 @@
 #include "librecomp/rsp.hpp"
 #include "librecomp/rsp_vu_impl.hpp"
+#include <cstdio>
+#include <cstring>
+static int asp_cmd_count = 0;
+static int asp_task_id = 0;
+
+// Expected dispatch table values (IMEM addresses for audio command handlers)
+static const uint16_t expected_dispatch[16] = {
+    0x1118, 0x14A4, 0x11EC, 0x1BA0,
+    0x123C, 0x18D4, 0x1270, 0x12D4,
+    0x12F0, 0x132C, 0x1428, 0x12A4,
+    0x1E3C, 0x1390, 0x1758, 0x1480,
+};
+
+static bool asp_check_dispatch_table() {
+    for (int i = 0; i < 16; i++) {
+        uint16_t val = (uint16_t)RSP_MEM_HU_LOAD(0x10, i * 2);
+        if (val != expected_dispatch[i]) {
+            fprintf(stderr, "[ASP] DISPATCH TABLE CORRUPTED at index %d (DMEM[0x%03X]): got 0x%04X, expected 0x%04X (task#%d, cmd#%d)\n",
+                i, 0x10 + i * 2, val, expected_dispatch[i], asp_task_id, asp_cmd_count);
+            // Dump full dispatch table
+            fprintf(stderr, "[ASP] Dispatch table dump:");
+            for (int j = 0; j < 16; j++) {
+                fprintf(stderr, " %04X", (uint16_t)RSP_MEM_HU_LOAD(0x10, j * 2));
+            }
+            fprintf(stderr, "\n");
+            fflush(stderr);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Custom DMA functions that handle the full SP_RD_LEN/SP_WR_LEN register format:
+//   bits[11:0]  = length per row minus 1
+//   bits[19:12] = row count minus 1
+//   bits[31:20] = RDRAM skip between rows
+// The library's dma_rdram_to_dmem only handles single-row DMA and has an
+// assert(dmem_addr + rd_len <= 0x1000) that fires for multi-row transfers.
+// RSP_MEM_B already wraps DMEM addresses at 0xFFF, so byte accesses are safe.
+static void asp_dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t rd_len_reg) {
+    uint32_t length = (rd_len_reg & 0xFFF) + 1;
+    uint32_t count = ((rd_len_reg >> 12) & 0xFF) + 1;
+    uint32_t skip = (rd_len_reg >> 20) & 0xFFF;
+    dram_addr &= 0xFFFFF8;
+    for (uint32_t row = 0; row < count; row++) {
+        for (uint32_t i = 0; i < length; i++) {
+            RSP_MEM_B(i, dmem_addr) = MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000));
+        }
+        dmem_addr = (dmem_addr + length) & 0xFFF;
+        dram_addr += length + skip;
+    }
+}
+
+static void asp_dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t wr_len_reg) {
+    uint32_t length = (wr_len_reg & 0xFFF) + 1;
+    uint32_t count = ((wr_len_reg >> 12) & 0xFF) + 1;
+    uint32_t skip = (wr_len_reg >> 20) & 0xFFF;
+    dram_addr &= 0xFFFFF8;
+    for (uint32_t row = 0; row < count; row++) {
+        for (uint32_t i = 0; i < length; i++) {
+            MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000)) = RSP_MEM_B(i, dmem_addr);
+        }
+        dmem_addr = (dmem_addr + length) & 0xFFF;
+        dram_addr += length + skip;
+    }
+}
 RspExitReason aspMain(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {
+    asp_cmd_count = 0;
+    asp_task_id++;
+    fprintf(stderr, "[ASP] === Starting aspMain task #%d ===\n", asp_task_id);
+    // Verify dispatch table was loaded correctly by the framework
+    {
+        fprintf(stderr, "[ASP] Initial dispatch table:");
+        for (int i = 0; i < 16; i++) {
+            fprintf(stderr, " %04X", (uint16_t)RSP_MEM_HU_LOAD(0x10, i * 2));
+        }
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
     uint32_t           r1 = 0,  r2 = 0,  r3 = 0,  r4 = 0,  r5 = 0,  r6 = 0,  r7 = 0;
     uint32_t  r8 = 0,  r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
     uint32_t r16 = 0, r17 = 0, r18 = 0, r19 = 0, r20 = 0, r21 = 0, r22 = 0, r23 = 0;
@@ -86,6 +164,10 @@ L_1054:
     // addi        $29, $zero, 0x380
     r29 = RSP_ADD32(0, 0X380);
     // mtc0        $zero, SP_SEMAPHORE
+    // [PATCH] DMA is synchronous in recompiled version - load first command batch
+    // before processing any commands. On real RSP, the boot code or async DMA
+    // would have populated DMEM[0x380] before the microcode reached this point.
+    goto L_10D4;
 L_1064:
     // lw          $26, 0x0($29)
     r26 = RSP_MEM_W_LOAD(0X0, r29);
@@ -95,6 +177,13 @@ L_1064:
     r1 = S32(U32(r26) >> 23);
     // andi        $1, $1, 0xFE
     r1 = r1 & 0XFE;
+    // [DEBUG] Trace command dispatch (reduced verbosity)
+    asp_cmd_count++;
+    if (asp_task_id <= 3) {
+        fprintf(stderr, "[ASP] t%d cmd#%d: op=%d w0=0x%08X w1=0x%08X\n",
+            asp_task_id, asp_cmd_count, r1/2, r26, r25);
+        fflush(stderr);
+    }
     // addi        $28, $28, 0x8
     r28 = RSP_ADD32(r28, 0X8);
     // addi        $27, $27, -0x8
@@ -106,7 +195,13 @@ L_1064:
     // add         $2, $zero, $1
     r2 = RSP_ADD32(0, r1);
     // lh          $2, 0x10($2)
-    r2 = RSP_MEM_H_LOAD(0X10, r2);
+    // [PATCH] Use static dispatch table instead of DMEM read.
+    // Audio processing (POLEF, RESAMPLE) writes output via SDV stores that wrap
+    // around the 4KB DMEM and overwrite the dispatch table at DMEM[0x10..0x2F].
+    // On real RSP hardware this is harmless (table already consumed), but in the
+    // recomp we re-read it for every command. The table never changes, so use
+    // the known-good static copy.
+    r2 = expected_dispatch[r1 / 2];
     // jr          $2
     jump_target = r2;
     debug_file = __FILE__; debug_line = __LINE__;
@@ -170,9 +265,9 @@ L_10D4:
 
 L_10D8:
     // b           L_10D8
-    // nop
-
-    goto L_10D8;
+    // [PATCH] Was an infinite DMA stall loop on real RSP hardware.
+    // In recompiled version, DMA is synchronous so we fall through
+    // to the command batch loading code immediately.
     // nop
 
     // addi        $5, $ra, 0x0
@@ -207,11 +302,10 @@ L_1108:
     // addi        $29, $zero, 0x380
     r29 = RSP_ADD32(0, 0X380);
     // jr          $5
-    jump_target = r5;
-    debug_file = __FILE__; debug_line = __LINE__;
-    // nop
-
-    goto do_indirect_jump;
+    // [PATCH] After loading a command batch via DMA, always go to L_1064 to
+    // process commands. The original jr $5 returned to the caller, but in
+    // the recompiled version the stall-based flow doesn't work.
+    goto L_1064;
     // nop
 
     // mfc0        $4, SP_SEMAPHORE
@@ -227,12 +321,31 @@ L_1118:
     }
     // nop
 
+    // [PATCH] On real RSP, every command handler jumps to L_1118 which starts a
+    // background DMA for the next command batch while continuing to process commands.
+    // In the recompiled version DMA is synchronous, so we only do the DMA when
+    // r22 == 0 (set by L_1194 for batch loading). When handlers return here
+    // after processing a command, r22 is already set (0x80000000) so we skip
+    // the DMA and go directly to L_1098 (the command loop) which checks if there
+    // are more commands in the current batch. We must NOT return via jr r31 to
+    // L_1108, because L_1108 resets r29=0x380 (the DMEM read pointer), which
+    // would cause every command to re-read the first command in the batch.
+    if (r22 != 0) {
+        goto L_1098;
+    }
     // mtc0        $1, SP_MEM_ADDR
     SET_DMA_MEM(r1);
     // mtc0        $2, SP_DRAM_ADDR
     SET_DMA_DRAM(r2);
+    // [DEBUG] Trace DMA reads
+    if (asp_cmd_count < 50) {
+        fprintf(stderr, "[ASP] DMA_READ: dmem=0x%03X dram=0x%08X len=0x%X\n", r1, r2, r3);
+        fflush(stderr);
+    }
     // mtc0        $3, SP_RD_LEN
-    DO_DMA_READ(r3);
+    // [PATCH] Use custom multi-row DMA that properly handles the full SP_RD_LEN
+    // register format (length/count/skip) and DMEM address wrapping.
+    asp_dma_rdram_to_dmem(rdram, dma_mem_address, dma_dram_address, r3);
     // lui         $4, 0x8000
     r4 = S32(0X8000 << 16);
     // or          $22, $4, $22
@@ -262,8 +375,14 @@ L_1144:
     SET_DMA_MEM(r1);
     // mtc0        $2, SP_DRAM_ADDR
     SET_DMA_DRAM(r2);
+    // [DEBUG] Trace DMA writes
+    if (asp_cmd_count < 50) {
+        fprintf(stderr, "[ASP] DMA_WRITE: dmem=0x%03X dram=0x%08X len=0x%X\n", r1, r2, r3);
+        fflush(stderr);
+    }
     // mtc0        $3, SP_WR_LEN
-    DO_DMA_WRITE(r3);
+    // [PATCH] Use custom multi-row DMA for writes too.
+    asp_dma_dmem_to_rdram(rdram, dma_mem_address, dma_dram_address, r3);
     // lui         $4, 0x8000
     r4 = S32(0X8000 << 16);
 L_1160:
@@ -317,6 +436,37 @@ L_1194:
 
     // and         $22, $zero, $zero
     r22 = 0 & 0;
+    // [PATCH] Perform DMA directly, bypassing the clear loop and L_1118.
+    {
+        uint32_t first_row_len = (r3 & 0xFFF) + 1;
+        uint32_t dma_count = ((r3 >> 12) & 0xFF) + 1;
+        uint32_t dma_skip = (r3 >> 20) & 0xFFF;
+        uint32_t total_dmem_bytes = first_row_len * dma_count;
+        bool dma_wraps = ((r1 & 0xFFF) + total_dmem_bytes) > 0x1000;
+
+        if (asp_task_id <= 3) {
+            fprintf(stderr, "[ASP] L_1194 DMA: dmem=0x%03X dram=0x%08X len=%d count=%d skip=%d total=%d wraps=%d r31=0x%04X\n",
+                r1, r2, first_row_len, dma_count, dma_skip, total_dmem_bytes, dma_wraps, r31);
+            fflush(stderr);
+        }
+
+        uint8_t saved_lower_dmem[0x5C0];
+        if (dma_wraps) {
+            memcpy(saved_lower_dmem, dmem, 0x5C0);
+        }
+
+        SET_DMA_MEM(r1);
+        SET_DMA_DRAM(r2);
+        asp_dma_rdram_to_dmem(rdram, dma_mem_address, dma_dram_address, r3);
+
+        if (dma_wraps) {
+            memcpy(dmem, saved_lower_dmem, 0x5C0);
+        }
+    }
+    r22 = S32(0X8000 << 16);  // mark DMA complete
+    jump_target = r31;
+    debug_file = __FILE__; debug_line = __LINE__;
+    goto do_indirect_jump;
 L_11A0:
     // sdv         $v1[0], 0x0($1)
     rsp.SDV<0>(rsp.vpu.r[1], r1, 0X0);
@@ -333,9 +483,13 @@ L_11A0:
     // addi        $3, $3, -0x10
     r3 = RSP_ADD32(r3, -0X10);
     // j           L_1118
-    // nop
+    // [PATCH] After A_CLEARBUFF's clear loop, return to command dispatch instead
+    // of starting a DMA with destroyed register values. The original L_1118
+    // DMA was a pipeline optimization (background DMA for next command batch)
+    // that doesn't work with synchronous DMA.
+    goto L_1098;
 
-    goto L_1118;
+    goto L_1098;
     // nop
 
     // lhu         $3, 0x4($24)
@@ -373,6 +527,7 @@ L_11E8:
     // nop
 
     goto L_1118;
+L_11EC:
     // nop
 
     // lhu         $3, 0x4($24)
@@ -423,6 +578,7 @@ L_121C:
     r5 = RSP_MEM_W_LOAD(0X320, r4);
     // add         $2, $2, $5
     r2 = RSP_ADD32(r2, r5);
+L_123C:
     // addi        $1, $zero, 0x4C0
     r1 = RSP_ADD32(0, 0X4C0);
     // andi        $3, $26, 0xFFFF
@@ -457,6 +613,7 @@ L_124C:
     goto L_1118;
     // sw          $3, 0x320($4)
     RSP_MEM_W_STORE(0X320, r4, r3);
+L_1270:
     // addi        $1, $26, 0x5C0
     r1 = RSP_ADD32(r26, 0X5C0);
     // srl         $2, $25, 16
@@ -490,6 +647,7 @@ L_129C:
     RSP_MEM_H_STORE(0XE, r24, r3);
     // sh          $1, 0xA($24)
     RSP_MEM_H_STORE(0XA, r24, r1);
+L_12A4:
     // j           L_1118
     // sh          $2, 0xC($24)
     RSP_MEM_H_STORE(0XC, r24, r2);
@@ -531,6 +689,7 @@ L_12C8:
     
         goto L_12E0;
     }
+L_12D4:
     // nop
 
     // j           L_1118
@@ -555,6 +714,7 @@ L_12E8:
     }
     // srl         $1, $25, 16
     r1 = S32(U32(r25) >> 16);
+L_12F0:
     // sh          $26, 0x10($24)
     RSP_MEM_H_STORE(0X10, r24, r26);
     // sh          $1, 0x12($24)
@@ -594,6 +754,7 @@ L_1300:
     r1 = S32(U32(r25) >> 16);
     // addi        $1, $1, 0x5C0
     r1 = RSP_ADD32(r1, 0X5C0);
+L_132C:
     // beq         $22, $zero, L_1344
     if (r22 == 0) {
         // nop
@@ -654,6 +815,7 @@ L_1344:
     rsp.SSV<14>(rsp.vpu.r[2], r3, 0XF);
     // addi        $4, $4, -0x10
     r4 = RSP_ADD32(r4, -0X10);
+L_1390:
     // addi        $1, $1, 0x10
     r1 = RSP_ADD32(r1, 0X10);
     // addi        $2, $2, 0x10
@@ -758,6 +920,7 @@ L_13D8:
 
     // lqv         $v31[0], 0x0($zero)
     rsp.LQV<0>(rsp.vpu.r[31], 0, 0X0);
+L_1428:
     // vxor        $v27, $v27, $v27
     rsp.VXOR<0>(rsp.vpu.r[27], rsp.vpu.r[27], rsp.vpu.r[27]);
     // lhu         $21, 0x0($24)
@@ -802,6 +965,7 @@ L_13D8:
     r17 = RSP_ADD32(r17, r3);
     // sqv         $v27[0], 0x0($19)
     rsp.SQV<0>(rsp.vpu.r[27], r19, 0X0);
+L_1480:
     // sqv         $v27[0], 0x10($19)
     rsp.SQV<0>(rsp.vpu.r[27], r19, 0X1);
     // srl         $1, $26, 16
@@ -1155,20 +1319,29 @@ L_16C4:
     goto L_1118;
     // and         $22, $zero, $zero
     r22 = 0 & 0;
+    // [PATCH] This block was dead code (unreachable after the goto above).
+    // It's the setup phase for A_POLEF/A_RESAMPLE that initializes r20, r21, r19
+    // from DMEM parameters. Without this, the POLEF handler uses uninitialized
+    // r20 as an output buffer address and overwrites the dispatch table at DMEM[0x10].
+    // We add a label so L_1758 can jump here.
+L_POLEF_SETUP:
     // lqv         $v31[0], 0x0($zero)
     rsp.LQV<0>(rsp.vpu.r[31], 0, 0X0);
     // vxor        $v28, $v28, $v28
     rsp.VXOR<0>(rsp.vpu.r[28], rsp.vpu.r[28], rsp.vpu.r[28]);
     // lhu         $21, 0x0($24)
-    r21 = RSP_MEM_HU_LOAD(0X0, r24);
+    // [PATCH] Read from SETBUFF bank (r24+0x10) instead of SAVEBUFF bank (r24+0).
+    // A_SETBUFF (L_12F0) stores dmemin at DMEM[r24+0x10] and count at DMEM[r24+0x14].
+    // POLEF is always in-place (dmemin == dmemout), so r21 = r20 = dmemin.
+    r21 = RSP_MEM_HU_LOAD(0X10, r24);
     // vxor        $v17, $v17, $v17
     rsp.VXOR<0>(rsp.vpu.r[17], rsp.vpu.r[17], rsp.vpu.r[17]);
     // lhu         $20, 0x2($24)
-    r20 = RSP_MEM_HU_LOAD(0X2, r24);
+    r20 = RSP_MEM_HU_LOAD(0X10, r24);
     // vxor        $v18, $v18, $v18
     rsp.VXOR<0>(rsp.vpu.r[18], rsp.vpu.r[18], rsp.vpu.r[18]);
     // lhu         $19, 0x4($24)
-    r19 = RSP_MEM_HU_LOAD(0X4, r24);
+    r19 = RSP_MEM_HU_LOAD(0X14, r24);
     // vxor        $v19, $v19, $v19
     rsp.VXOR<0>(rsp.vpu.r[19], rsp.vpu.r[19], rsp.vpu.r[19]);
     // beq         $19, $zero, L_184C
@@ -1230,6 +1403,14 @@ L_16C4:
     // addi        $3, $zero, 0x7
     r3 = RSP_ADD32(0, 0X7);
     goto L_1194;
+L_1758:
+    // [PATCH] On real RSP, setup code at IMEM ~0x1318 runs before the POLEF handler
+    // to initialize r20/r21/r19 from DMEM parameters and load filter state via DMA.
+    // In the recomp, that code is unreachable dead code. We redirect here so it runs.
+    // The setup code either:
+    //   - Calls L_1194 for DMA and returns to L_175C (first frame)
+    //   - Jumps to L_176C directly (continuation frame)
+    goto L_POLEF_SETUP;
     // addi        $3, $zero, 0x7
     r3 = RSP_ADD32(0, 0X7);
 L_175C:
@@ -1383,6 +1564,11 @@ L_184C:
     goto L_1118;
     // nop
 
+    // [PATCH] This block was dead code (unreachable after the goto above).
+    // It's the setup phase for A_RESAMPLE that initializes r8, r19, r18
+    // from DMEM parameters and loads resampler state from DRAM.
+    // We add a label so L_18D4 can jump here.
+L_RESAMPLE_SETUP:
     // lh          $8, 0x0($24)
     r8 = RSP_MEM_H_LOAD(0X0, r24);
     // lh          $19, 0x2($24)
@@ -1416,7 +1602,7 @@ L_184C:
     // bgtz        $10, L_18B8
     if (RSP_SIGNED(r10) > 0) {
         // nop
-    
+
         goto L_18B8;
     }
     // nop
@@ -1473,6 +1659,11 @@ L_18C0:
 L_18D0:
     // sh          $zero, 0x8($23)
     RSP_MEM_H_STORE(0X8, r23, 0);
+L_18D4:
+    // [PATCH] On real RSP, setup code at IMEM ~0x1854 runs before the RESAMPLE handler
+    // to initialize r8/r19/r18 from DMEM parameters and load resampler state via DMA.
+    // In the recomp, that code is unreachable dead code. We redirect here so it runs.
+    goto L_RESAMPLE_SETUP;
     // vxor        $v16, $v16, $v16
     rsp.VXOR<0>(rsp.vpu.r[16], rsp.vpu.r[16], rsp.vpu.r[16]);
     // sdv         $v16[0], 0x0($23)
@@ -2289,6 +2480,7 @@ L_1DFC:
     
         goto L_1EAC;
     }
+L_1E3C:
     // nop
 
 L_1E40:
@@ -2381,10 +2573,26 @@ do_indirect_jump:
         case 0x16C4: goto L_16C4;
         case 0x175C: goto L_175C;
         case 0x184C: goto L_184C;
+        case 0x14A4: goto L_14A4;
         case 0x18A0: goto L_18A0;
         case 0x1B18: goto L_1B18;
         case 0x1B74: goto L_1B74;
         case 0x1DB4: goto L_1DB4;
+        case 0x1118: goto L_1118;
+        case 0x11EC: goto L_11EC;
+        case 0x1BA0: goto L_1BA0;
+        case 0x123C: goto L_123C;
+        case 0x18D4: goto L_18D4;
+        case 0x12F0: goto L_12F0;
+        case 0x1270: goto L_1270;
+        case 0x12D4: goto L_12D4;
+        case 0x132C: goto L_132C;
+        case 0x1428: goto L_1428;
+        case 0x12A4: goto L_12A4;
+        case 0x1E3C: goto L_1E3C;
+        case 0x1390: goto L_1390;
+        case 0x1758: goto L_1758;
+        case 0x1480: goto L_1480;
     }
     printf("Unhandled jump target 0x%04X in microcode aspMain, coming from [%s:%d]\n", jump_target, debug_file, debug_line);
     printf("Register dump: r0  = %08X r1  = %08X r2  = %08X r3  = %08X r4  = %08X r5  = %08X r6  = %08X r7  = %08X\n"

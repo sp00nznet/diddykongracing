@@ -1,97 +1,36 @@
-#include <memory>
 #include <cstdio>
+#include <cstring>
+#include <memory>
+#include <vector>
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <unknwn.h>
 #endif
 
+#include <SDL.h>
+
 #include "ultramodern/renderer_context.hpp"
-#include "hle/rt64_application.h"
+#include "f3ddkr.h"
 
-static uint32_t MI_INTR_REG = 0;
-static uint32_t DPC_START_REG = 0;
-static uint32_t DPC_END_REG = 0;
-static uint32_t DPC_CURRENT_REG = 0;
-static uint32_t DPC_STATUS_REG = 0;
-static uint32_t DPC_CLOCK_REG = 0;
-static uint32_t DPC_BUFBUSY_REG = 0;
-static uint32_t DPC_PIPEBUSY_REG = 0;
-static uint32_t DPC_TMEM_REG = 0;
+// SDL window from main.cpp
+extern SDL_Window* get_sdl_window();
 
-// Defined in librecomp/src/rsp.cpp
-extern uint8_t dmem[];
-// IMEM - not used by HLE but RT64 needs a valid pointer
-uint8_t imem[0x1000];
-
-// RT64 calls this after DP/SP interrupt events
-static void check_interrupts() {
-    // In the recomp runtime, interrupts are handled by ultramodern's event system.
-    // This callback satisfies RT64's requirement but the actual interrupt processing
-    // happens through the ultramodern scheduler.
-}
-
-class RT64Context : public ultramodern::renderer::RendererContext {
+// Pure software framebuffer renderer - reads N64 framebuffer from RDRAM via VI registers
+// and displays it using SDL window surface (no GPU renderer needed).
+class SoftwareRendererContext : public ultramodern::renderer::RendererContext {
 public:
-    RT64Context(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
-        auto* vi_regs = ultramodern::renderer::get_vi_regs();
+    SoftwareRendererContext(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode)
+        : rdram_(rdram) {
+        vi_regs_ = ultramodern::renderer::get_vi_regs();
+        setup_result = ultramodern::renderer::SetupResult::Success;
 
-        RT64::Application::Core core{};
-        core.window = window_handle.window;
-        core.HEADER = rdram;
-        core.RDRAM = rdram;
-        core.DMEM = dmem;
-        core.IMEM = imem;
-        core.MI_INTR_REG = &MI_INTR_REG;
-        core.DPC_START_REG = &DPC_START_REG;
-        core.DPC_END_REG = &DPC_END_REG;
-        core.DPC_CURRENT_REG = &DPC_CURRENT_REG;
-        core.DPC_STATUS_REG = &DPC_STATUS_REG;
-        core.DPC_CLOCK_REG = &DPC_CLOCK_REG;
-        core.DPC_BUFBUSY_REG = &DPC_BUFBUSY_REG;
-        core.DPC_PIPEBUSY_REG = &DPC_PIPEBUSY_REG;
-        core.DPC_TMEM_REG = &DPC_TMEM_REG;
-        core.VI_STATUS_REG = &vi_regs->VI_STATUS_REG;
-        core.VI_ORIGIN_REG = &vi_regs->VI_ORIGIN_REG;
-        core.VI_WIDTH_REG = &vi_regs->VI_WIDTH_REG;
-        core.VI_INTR_REG = &vi_regs->VI_INTR_REG;
-        core.VI_V_CURRENT_LINE_REG = &vi_regs->VI_V_CURRENT_LINE_REG;
-        core.VI_TIMING_REG = &vi_regs->VI_TIMING_REG;
-        core.VI_V_SYNC_REG = &vi_regs->VI_V_SYNC_REG;
-        core.VI_H_SYNC_REG = &vi_regs->VI_H_SYNC_REG;
-        core.VI_LEAP_REG = &vi_regs->VI_LEAP_REG;
-        core.VI_H_START_REG = &vi_regs->VI_H_START_REG;
-        core.VI_V_START_REG = &vi_regs->VI_V_START_REG;
-        core.VI_V_BURST_REG = &vi_regs->VI_V_BURST_REG;
-        core.VI_X_SCALE_REG = &vi_regs->VI_X_SCALE_REG;
-        core.VI_Y_SCALE_REG = &vi_regs->VI_Y_SCALE_REG;
-        core.checkInterrupts = check_interrupts;
-
-        RT64::ApplicationConfiguration app_config{};
-        app_config.appId = "DKRRecompiled";
-
-        app = std::make_unique<RT64::Application>(core, app_config);
-        auto result = app->setup(window_handle.thread_id);
-        switch (result) {
-            case RT64::Application::SetupResult::Success:
-                setup_result = ultramodern::renderer::SetupResult::Success;
-                break;
-            case RT64::Application::SetupResult::DynamicLibrariesNotFound:
-                setup_result = ultramodern::renderer::SetupResult::DynamicLibrariesNotFound;
-                break;
-            case RT64::Application::SetupResult::InvalidGraphicsAPI:
-                setup_result = ultramodern::renderer::SetupResult::InvalidGraphicsAPI;
-                break;
-            case RT64::Application::SetupResult::GraphicsAPINotFound:
-                setup_result = ultramodern::renderer::SetupResult::GraphicsAPINotFound;
-                break;
-            case RT64::Application::SetupResult::GraphicsDeviceNotFound:
-                setup_result = ultramodern::renderer::SetupResult::GraphicsDeviceNotFound;
-                break;
-        }
+        window_ = get_sdl_window();
+        fprintf(stderr, "[DKR-GFX] Software renderer init, RDRAM=0x%p, window=%p\n", rdram, window_);
+        fflush(stderr);
     }
 
-    ~RT64Context() override = default;
+    ~SoftwareRendererContext() override {
+    }
 
     bool valid() override {
         return setup_result == ultramodern::renderer::SetupResult::Success;
@@ -106,20 +45,160 @@ public:
     }
 
     void send_dl(const OSTask* task) override {
-        app->processDisplayLists(
-            app->core.RDRAM,
-            task->t.data_ptr,
-            task->t.data_size,
-            true
-        );
+        dl_count_++;
+        if (dl_count_ <= 20 || (dl_count_ <= 200 && dl_count_ % 50 == 0)) {
+            fprintf(stderr, "[DKR-GFX] send_dl #%d: data_ptr=0x%08X data_size=0x%08X\n",
+                dl_count_, task->t.data_ptr, task->t.data_size);
+            fflush(stderr);
+        }
+        f3ddkr_process_dl(rdram_, task->t.data_ptr, task->t.data_size);
     }
 
     void update_screen() override {
-        app->updateScreen();
+        if (!window_ || !rdram_) return;
+
+        screen_count_++;
+
+        // Read VI registers
+        uint32_t vi_status = vi_regs_->VI_STATUS_REG;
+        uint32_t vi_origin = vi_regs_->VI_ORIGIN_REG;
+        uint32_t vi_width  = vi_regs_->VI_WIDTH_REG;
+        uint32_t vi_v_start = vi_regs_->VI_V_START_REG;
+        uint32_t vi_h_start = vi_regs_->VI_H_START_REG;
+        uint32_t vi_x_scale = vi_regs_->VI_X_SCALE_REG;
+        uint32_t vi_y_scale = vi_regs_->VI_Y_SCALE_REG;
+
+        // Log meaningful VI state changes (ignore origin alternation from double-buffering)
+        if (vi_status != last_vi_status_ || vi_width != last_vi_width_ ||
+            vi_v_start != last_vi_v_start_ || vi_h_start != last_vi_h_start_) {
+            fprintf(stderr, "[DKR-GFX] VI mode changed (screen#%d): status=0x%08X origin=0x%08X "
+                "width=%u v_start=0x%08X h_start=0x%08X x_scale=0x%03X y_scale=0x%03X\n",
+                screen_count_, vi_status, vi_origin, vi_width,
+                vi_v_start, vi_h_start, vi_x_scale & 0xFFF, vi_y_scale & 0xFFF);
+            fflush(stderr);
+            last_vi_status_ = vi_status;
+            last_vi_width_ = vi_width;
+            last_vi_v_start_ = vi_v_start;
+            last_vi_h_start_ = vi_h_start;
+        }
+        // Periodic status every 300 frames
+        if (screen_count_ % 300 == 0) {
+            fprintf(stderr, "[DKR-GFX] Status: screen#%d, %d DLs, origin=0x%08X\n",
+                screen_count_, dl_count_, vi_origin);
+            fflush(stderr);
+        }
+
+        // Extract pixel format: bits 0-1 of VI_STATUS
+        // 0 = blank, 2 = 16-bit (RGBA5551), 3 = 32-bit (RGBA8888)
+        uint32_t pixel_size = vi_status & 0x3;
+        if (pixel_size < 2 || vi_origin == 0 || vi_width == 0) {
+            return;
+        }
+
+        // Calculate display dimensions from VI registers
+        uint32_t v_start = (vi_v_start >> 16) & 0x3FF;
+        uint32_t v_end = vi_v_start & 0x3FF;
+        uint32_t y_scale_raw = vi_y_scale & 0xFFF;
+
+        uint32_t screen_width = vi_width;
+        uint32_t screen_height = 0;
+
+        if (y_scale_raw > 0 && v_end > v_start) {
+            uint32_t v_range = (v_end - v_start) / 2;
+            screen_height = (v_range * y_scale_raw) / 1024;
+        }
+        if (screen_height == 0) screen_height = 240;
+        if (screen_width == 0) screen_width = 320;
+        if (screen_width > 640) screen_width = 640;
+        if (screen_height > 480) screen_height = 480;
+
+        // Convert VI_ORIGIN to RDRAM offset
+        uint32_t fb_offset = vi_origin & 0x7FFFFF;
+
+        uint32_t bytes_per_pixel = (pixel_size == 3) ? 4 : 2;
+        uint32_t fb_size = screen_width * screen_height * bytes_per_pixel;
+
+        if (fb_offset + fb_size > 0x800000) {
+            return;
+        }
+
+        // Ensure our conversion buffer is big enough
+        uint32_t needed = screen_width * screen_height * 4;
+        if (conv_buffer_.size() < needed) {
+            conv_buffer_.resize(needed);
+        }
+
+        // Convert N64 framebuffer to RGBA8888 (native byte order)
+        uint32_t* dst = (uint32_t*)conv_buffer_.data();
+
+        if (pixel_size == 2) {
+            // 16-bit RGBA5551
+            for (uint32_t y = 0; y < screen_height; y++) {
+                for (uint32_t x = 0; x < screen_width; x++) {
+                    uint32_t pixel_offset = fb_offset + (y * screen_width + x) * 2;
+                    uint8_t hi = rdram_[pixel_offset ^ 3];
+                    uint8_t lo = rdram_[(pixel_offset + 1) ^ 3];
+                    uint16_t pixel = (hi << 8) | lo;
+
+                    uint8_t r = (pixel >> 11) & 0x1F;
+                    uint8_t g = (pixel >> 6) & 0x1F;
+                    uint8_t b = (pixel >> 1) & 0x1F;
+
+                    r = (r << 3) | (r >> 2);
+                    g = (g << 3) | (g >> 2);
+                    b = (b << 3) | (b >> 2);
+
+                    dst[y * screen_width + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                }
+            }
+        } else if (pixel_size == 3) {
+            // 32-bit RGBA8888
+            for (uint32_t y = 0; y < screen_height; y++) {
+                for (uint32_t x = 0; x < screen_width; x++) {
+                    uint32_t pixel_offset = fb_offset + (y * screen_width + x) * 4;
+                    uint8_t r = rdram_[pixel_offset ^ 3];
+                    uint8_t g = rdram_[(pixel_offset + 1) ^ 3];
+                    uint8_t b = rdram_[(pixel_offset + 2) ^ 3];
+
+                    dst[y * screen_width + x] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+
+        // Blit to window surface
+        SDL_Surface* window_surface = SDL_GetWindowSurface(window_);
+        if (!window_surface) {
+            if (screen_count_ <= 5) {
+                fprintf(stderr, "[DKR-GFX] SDL_GetWindowSurface failed: %s\n", SDL_GetError());
+                fflush(stderr);
+            }
+            return;
+        }
+
+        // Create an SDL surface from our converted buffer
+        SDL_Surface* fb_surface = SDL_CreateRGBSurfaceFrom(
+            conv_buffer_.data(),
+            screen_width, screen_height,
+            32,
+            screen_width * 4,
+            0x00FF0000,  // R mask
+            0x0000FF00,  // G mask
+            0x000000FF,  // B mask
+            0xFF000000   // A mask
+        );
+
+        if (fb_surface) {
+            // Scale blit to fill window
+            SDL_BlitScaled(fb_surface, nullptr, window_surface, nullptr);
+            SDL_FreeSurface(fb_surface);
+        }
+
+        SDL_UpdateWindowSurface(window_);
     }
 
     void shutdown() override {
-        app->end();
+        fprintf(stderr, "[DKR-GFX] Shutdown: %d DLs, %d screen updates\n", dl_count_, screen_count_);
+        fflush(stderr);
     }
 
     uint32_t get_display_framerate() const override {
@@ -131,10 +210,20 @@ public:
     }
 
 private:
-    std::unique_ptr<RT64::Application> app;
+    uint8_t* rdram_ = nullptr;
+    ultramodern::renderer::ViRegs* vi_regs_ = nullptr;
+    SDL_Window* window_ = nullptr;
+    std::vector<uint8_t> conv_buffer_;
+    int dl_count_ = 0;
+    int screen_count_ = 0;
+
+    uint32_t last_vi_status_ = 0xFFFFFFFF;
+    uint32_t last_vi_width_ = 0xFFFFFFFF;
+    uint32_t last_vi_v_start_ = 0xFFFFFFFF;
+    uint32_t last_vi_h_start_ = 0xFFFFFFFF;
 };
 
 std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_context(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
-    return std::make_unique<RT64Context>(rdram, window_handle, developer_mode);
+    return std::make_unique<SoftwareRendererContext>(rdram, window_handle, developer_mode);
 }
