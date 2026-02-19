@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <timeapi.h>
+#include <DbgHelp.h>
 
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -29,6 +30,24 @@ std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_conte
 
 // RSP microcode (C++ linkage - matches aspMain.cpp)
 RspExitReason aspMain(uint8_t* rdram, uint32_t ucode_addr);
+
+// Wrapper around aspMain that adds diagnostics
+extern uint8_t dmem[];
+static int audio_task_count = 0;
+RspExitReason aspMain_wrapper(uint8_t* rdram, uint32_t ucode_addr) {
+    audio_task_count++;
+    fprintf(stderr, "[DKR] Audio task #%d\n", audio_task_count);
+    fflush(stderr);
+
+    RspExitReason result = aspMain(rdram, ucode_addr);
+    if (result != RspExitReason::Broke) {
+        fprintf(stderr, "[DKR] aspMain FAILED with reason %d (task #%d)\n",
+            (int)result, audio_task_count);
+        fflush(stderr);
+        return RspExitReason::Broke;
+    }
+    return result;
+}
 
 // xxHash3 for ROM hash computation
 #include "xxHash/xxh3.h"
@@ -171,10 +190,15 @@ ultramodern::input::connected_device_info_t get_connected_device_info(int contro
 RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
     // DKR uses aspMain for audio
     // task_type 2 = audio
-    // task_type 1 = graphics (handled by RT64)
+    // task_type 1 = graphics (handled by RT64 - but f3ddkr not supported yet)
     if (task->t.type == 2) {
-        return aspMain;
+        return aspMain_wrapper;
     }
+    if (task->t.type == 1) {
+        // Return nullptr to send to RT64 (which will be a no-op via our send_dl stub)
+        return nullptr;
+    }
+    fprintf(stderr, "[DKR] Unknown RSP task type: %u\n", task->t.type);
     return nullptr;
 }
 
@@ -182,6 +206,11 @@ RspUcodeFunc* get_rsp_microcode(const OSTask* task) {
 // GFX callbacks (SDL window management)
 // -----------------------------------------------
 static SDL_Window* sdl_window = nullptr;
+
+// Exported for rt64_render_context.cpp software framebuffer display
+SDL_Window* get_sdl_window() {
+    return sdl_window;
+}
 
 void* create_gfx() {
     sdl_window = SDL_CreateWindow(
@@ -279,21 +308,116 @@ static std::filesystem::path find_rom() {
 // -----------------------------------------------
 // Main
 // -----------------------------------------------
-// Crash handler for debugging
+// Crash handler - writes to both stderr and a file
 static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
-    fprintf(stderr, "\n[DKR] CRASH at address 0x%p\n", ep->ExceptionRecord->ExceptionAddress);
-    fprintf(stderr, "[DKR] Exception code: 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
+    // Open crash log file next to exe
+    char exe_path[MAX_PATH];
+    GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+    std::filesystem::path log_path = std::filesystem::path(exe_path).parent_path() / "dkr_crash.log";
+    FILE* logf = fopen(log_path.string().c_str(), "w");
+
+    // Helper macro to write to both stderr and file
+    #define CRASH_LOG(fmt, ...) do { \
+        fprintf(stderr, fmt, ##__VA_ARGS__); fflush(stderr); \
+        if (logf) { fprintf(logf, fmt, ##__VA_ARGS__); fflush(logf); } \
+    } while(0)
+
+    CRASH_LOG("\n========== DKR CRASH REPORT ==========\n");
+    CRASH_LOG("[DKR] Exception code: 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
+    CRASH_LOG("[DKR] Crash address: 0x%p\n", ep->ExceptionRecord->ExceptionAddress);
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
-        fprintf(stderr, "[DKR] Access violation %s address 0x%p\n",
+        ULONG_PTR fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
+        CRASH_LOG("[DKR] Access violation %s address 0x%016llX\n",
             ep->ExceptionRecord->ExceptionInformation[0] == 0 ? "reading" : "writing",
-            (void*)ep->ExceptionRecord->ExceptionInformation[1]);
+            (unsigned long long)fault_addr);
     }
-    fprintf(stderr, "[DKR] RIP=0x%p RSP=0x%p\n",
-        (void*)ep->ContextRecord->Rip, (void*)ep->ContextRecord->Rsp);
+
     HMODULE hmod = GetModuleHandleA(nullptr);
-    fprintf(stderr, "[DKR] Module base=0x%p, crash offset=0x%llX\n",
-        hmod, (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - (uintptr_t)hmod));
-    fflush(stderr);
+    uintptr_t base = (uintptr_t)hmod;
+    CRASH_LOG("[DKR] Module base=0x%p, crash offset=0x%llX\n",
+        hmod, (unsigned long long)((uintptr_t)ep->ExceptionRecord->ExceptionAddress - base));
+
+    // Dump x64 register context
+    auto* c = ep->ContextRecord;
+    CRASH_LOG("[DKR] Registers: RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX\n",
+        (unsigned long long)c->Rax, (unsigned long long)c->Rbx,
+        (unsigned long long)c->Rcx, (unsigned long long)c->Rdx);
+    CRASH_LOG("[DKR] RSI=%016llX RDI=%016llX RBP=%016llX RSP=%016llX\n",
+        (unsigned long long)c->Rsi, (unsigned long long)c->Rdi,
+        (unsigned long long)c->Rbp, (unsigned long long)c->Rsp);
+    CRASH_LOG("[DKR] R8=%016llX R9=%016llX R10=%016llX R11=%016llX\n",
+        (unsigned long long)c->R8, (unsigned long long)c->R9,
+        (unsigned long long)c->R10, (unsigned long long)c->R11);
+    CRASH_LOG("[DKR] R12=%016llX R13=%016llX R14=%016llX R15=%016llX\n",
+        (unsigned long long)c->R12, (unsigned long long)c->R13,
+        (unsigned long long)c->R14, (unsigned long long)c->R15);
+    CRASH_LOG("[DKR] RIP=%016llX\n", (unsigned long long)c->Rip);
+
+    // Symbol resolution for the crashing RIP
+    CRASH_LOG("[DKR] Initializing symbols...\n");
+    HANDLE process = GetCurrentProcess();
+    HANDLE thread = GetCurrentThread();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    BOOL sym_ok = SymInitialize(process, NULL, TRUE);
+    CRASH_LOG("[DKR] SymInitialize: %s\n", sym_ok ? "OK" : "FAILED");
+
+    if (sym_ok) {
+        char sym_buf[sizeof(SYMBOL_INFO) + 512];
+        SYMBOL_INFO* sym = (SYMBOL_INFO*)sym_buf;
+
+        // First resolve the crashing RIP
+        memset(sym_buf, 0, sizeof(sym_buf));
+        sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+        sym->MaxNameLen = 512;
+        DWORD64 disp = 0;
+        CRASH_LOG("\n[DKR] Crashing function (RIP):\n");
+        if (SymFromAddr(process, c->Rip, &disp, sym)) {
+            CRASH_LOG("  -> %s+0x%llX\n", sym->Name, (unsigned long long)disp);
+        } else {
+            CRASH_LOG("  -> (unknown, module+0x%llX, err=%lu)\n",
+                (unsigned long long)(c->Rip - base), GetLastError());
+        }
+
+        // Stack trace using StackWalk64 with the exception context
+        CONTEXT ctx_copy = *c;
+        STACKFRAME64 frame{};
+        frame.AddrPC.Offset = c->Rip;
+        frame.AddrPC.Mode = AddrModeFlat;
+        frame.AddrFrame.Offset = c->Rbp;
+        frame.AddrFrame.Mode = AddrModeFlat;
+        frame.AddrStack.Offset = c->Rsp;
+        frame.AddrStack.Mode = AddrModeFlat;
+
+        CRASH_LOG("\n[DKR] Stack trace:\n");
+        for (int i = 0; i < 64; i++) {
+            if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread,
+                             &frame, &ctx_copy, NULL,
+                             SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
+                CRASH_LOG("  (StackWalk64 failed at frame %d, err=%lu)\n", i, GetLastError());
+                break;
+            }
+            if (frame.AddrPC.Offset == 0) break;
+
+            memset(sym_buf, 0, sizeof(sym_buf));
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 512;
+            DWORD64 displacement = 0;
+
+            if (SymFromAddr(process, frame.AddrPC.Offset, &displacement, sym)) {
+                CRASH_LOG("  [%2d] %s+0x%llX\n", i, sym->Name, (unsigned long long)displacement);
+            } else {
+                CRASH_LOG("  [%2d] 0x%016llX (module+0x%llX)\n", i,
+                    (unsigned long long)frame.AddrPC.Offset,
+                    (unsigned long long)(frame.AddrPC.Offset - base));
+            }
+        }
+
+        SymCleanup(process);
+    }
+
+    CRASH_LOG("========== END CRASH REPORT ==========\n");
+    if (logf) fclose(logf);
+    #undef CRASH_LOG
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
