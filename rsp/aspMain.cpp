@@ -1659,11 +1659,19 @@ L_18C0:
 L_18D0:
     // sh          $zero, 0x8($23)
     RSP_MEM_H_STORE(0X8, r23, 0);
+    // [PATCH] Jump to handler body, NOT to L_18D4 which redirects to setup.
+    // On real RSP, L_18D0 falls through to L_18D4 which IS the handler body.
+    // In the recomp, L_18D4 redirects to L_RESAMPLE_SETUP (for first-time init).
+    // Re-entering setup from L_18D0 creates an infinite loop, so skip to the body.
+    goto L_18D4_BODY;
 L_18D4:
     // [PATCH] On real RSP, setup code at IMEM ~0x1854 runs before the RESAMPLE handler
     // to initialize r8/r19/r18 from DMEM parameters and load resampler state via DMA.
     // In the recomp, that code is unreachable dead code. We redirect here so it runs.
+    // After setup, control flows through L_18B8 → L_18D0 → L_18D4_BODY (not back here).
     goto L_RESAMPLE_SETUP;
+L_18D4_BODY:
+    // Original handler body: clear state, check bit 1 of r7 for state restore
     // vxor        $v16, $v16, $v16
     rsp.VXOR<0>(rsp.vpu.r[16], rsp.vpu.r[16], rsp.vpu.r[16]);
     // sdv         $v16[0], 0x0($23)
@@ -1673,7 +1681,7 @@ L_18D4:
     // beq         $10, $zero, L_18FC
     if (r10 == 0) {
         // nop
-    
+
         goto L_18FC;
     }
     // nop

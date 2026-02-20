@@ -36,10 +36,16 @@ extern uint8_t dmem[];
 static int audio_task_count = 0;
 RspExitReason aspMain_wrapper(uint8_t* rdram, uint32_t ucode_addr) {
     audio_task_count++;
-    fprintf(stderr, "[DKR] Audio task #%d\n", audio_task_count);
-    fflush(stderr);
+    if (audio_task_count <= 10) {
+        fprintf(stderr, "[DKR] Audio task #%d starting\n", audio_task_count);
+        fflush(stderr);
+    }
 
     RspExitReason result = aspMain(rdram, ucode_addr);
+    if (audio_task_count <= 10) {
+        fprintf(stderr, "[DKR] Audio task #%d done, result=%d\n", audio_task_count, (int)result);
+        fflush(stderr);
+    }
     if (result != RspExitReason::Broke) {
         fprintf(stderr, "[DKR] aspMain FAILED with reason %d (task #%d)\n",
             (int)result, audio_task_count);
@@ -573,6 +579,15 @@ int main(int argc, char* argv[]) {
     config.events_callbacks = events_cbs;
     config.error_handling_callbacks = error_cbs;
     config.threads_callbacks = thread_cbs;
+    // Don't requeue SI/AI/VI messages when their queues are full - dropping them
+    // is fine (the game handles missed messages) and prevents the idle thread from
+    // getting stuck in an infinite requeue loop that starves SP/DP/VIDEO delivery.
+    // The root cause: SI (controller) messages arrive every frame, the SI queue fills
+    // up, and with requeue=true the failed messages cycle forever in the external
+    // queue, preventing VIDEO_MSG from reaching the scheduler.
+    config.message_queue_control.requeue_si = false;
+    config.message_queue_control.requeue_ai = false;
+    config.message_queue_control.requeue_vi = false;
 
     recomp::start(config);
 
