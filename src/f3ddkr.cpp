@@ -520,14 +520,45 @@ static void cmd_loadblock(uint32_t w0, uint32_t w1) {
         bytes_per_texel = 1; // already adjusted num_texels
     }
 
-    uint32_t bytes_to_copy = num_texels * bytes_per_texel;
-    if (bytes_to_copy > 4096 - tmem_offset) {
-        bytes_to_copy = 4096 - tmem_offset;
+    // For RGBA32 textures, LOADBLOCK uses SIZ_16b on the tile with 2x texel count,
+    // but the texture image (ti_size) tells us the true format
+    bool is_rgba32 = (g_state.ti_size == SIZ_32b);
+
+    static int lb_log = 0;
+    if (lb_log < 5) {
+        fprintf(stderr, "[F3DDKR] LOADBLOCK: tile=%d t.size=%d ti_size=%d tmem=0x%03X num_texels=%d rgba32=%d\n",
+                tile_idx, t.size, g_state.ti_size, t.tmem_addr, num_texels, is_rgba32);
+        fflush(stderr);
+        lb_log++;
     }
 
-    // Copy from RDRAM to TMEM byte by byte
-    for (uint32_t i = 0; i < bytes_to_copy; i++) {
-        g_state.tmem[tmem_offset + i] = rdram_read_u8(g_state.rdram, g_state.ti_addr + i);
+    if (is_rgba32) {
+        // RGBA32: interleave into two TMEM banks
+        // Low bank (0x000-0x7FF): R,G bytes
+        // High bank (0x800-0xFFF): B,A bytes
+        // When tile uses SIZ_16b for loading, num_texels counts 16-bit units (2x actual)
+        // When tile uses SIZ_32b, num_texels is already the 32-bit texel count
+        int actual_texels = (t.size == SIZ_16b) ? num_texels / 2 : num_texels;
+        for (int i = 0; i < actual_texels; i++) {
+            uint32_t src = g_state.ti_addr + i * 4;
+            uint32_t lo = tmem_offset + i * 2;
+            uint32_t hi = lo + 0x800;
+            if (lo + 1 >= 2048 || hi + 1 >= 4096) break;
+            g_state.tmem[lo]     = rdram_read_u8(g_state.rdram, src + 0); // R
+            g_state.tmem[lo + 1] = rdram_read_u8(g_state.rdram, src + 1); // G
+            g_state.tmem[hi]     = rdram_read_u8(g_state.rdram, src + 2); // B
+            g_state.tmem[hi + 1] = rdram_read_u8(g_state.rdram, src + 3); // A
+        }
+    } else {
+        uint32_t bytes_to_copy = num_texels * bytes_per_texel;
+        if (bytes_to_copy > 4096 - tmem_offset) {
+            bytes_to_copy = 4096 - tmem_offset;
+        }
+
+        // Copy from RDRAM to TMEM byte by byte
+        for (uint32_t i = 0; i < bytes_to_copy; i++) {
+            g_state.tmem[tmem_offset + i] = rdram_read_u8(g_state.rdram, g_state.ti_addr + i);
+        }
     }
 }
 
@@ -561,23 +592,38 @@ static void cmd_loadtile(uint32_t w0, uint32_t w1) {
     uint32_t src_line_bytes = g_state.ti_width * (bytes_per_texel ? bytes_per_texel : 1);
 
     for (int row = 0; row < height; row++) {
-        int row_bytes;
-        if (t.size == SIZ_4b) {
-            row_bytes = (width + 1) / 2;
-        } else {
-            row_bytes = width * bytes_per_texel;
-        }
         uint32_t tmem_row = tmem_offset + row * t.line * 8;
-        if (tmem_row + (uint32_t)row_bytes > 4096) break;
 
-        for (int col = 0; col < row_bytes; col++) {
-            uint32_t src_addr = g_state.ti_addr;
-            if (t.size == SIZ_4b) {
-                src_addr += (y0 + row) * ((g_state.ti_width + 1) / 2) + x0 / 2 + col;
-            } else {
-                src_addr += ((y0 + row) * g_state.ti_width + x0) * bytes_per_texel + col;
+        if (t.size == SIZ_32b) {
+            // RGBA32: interleave R,G to low bank, B,A to high bank
+            for (int col = 0; col < width; col++) {
+                uint32_t src_addr = g_state.ti_addr + ((y0 + row) * g_state.ti_width + x0 + col) * 4;
+                uint32_t lo = tmem_row + col * 2;
+                uint32_t hi = lo + 0x800;
+                if (lo + 1 >= 2048 || hi + 1 >= 4096) break;
+                g_state.tmem[lo]     = rdram_read_u8(g_state.rdram, src_addr + 0); // R
+                g_state.tmem[lo + 1] = rdram_read_u8(g_state.rdram, src_addr + 1); // G
+                g_state.tmem[hi]     = rdram_read_u8(g_state.rdram, src_addr + 2); // B
+                g_state.tmem[hi + 1] = rdram_read_u8(g_state.rdram, src_addr + 3); // A
             }
-            g_state.tmem[tmem_row + col] = rdram_read_u8(g_state.rdram, src_addr);
+        } else {
+            int row_bytes;
+            if (t.size == SIZ_4b) {
+                row_bytes = (width + 1) / 2;
+            } else {
+                row_bytes = width * bytes_per_texel;
+            }
+            if (tmem_row + (uint32_t)row_bytes > 4096) break;
+
+            for (int col = 0; col < row_bytes; col++) {
+                uint32_t src_addr = g_state.ti_addr;
+                if (t.size == SIZ_4b) {
+                    src_addr += (y0 + row) * ((g_state.ti_width + 1) / 2) + x0 / 2 + col;
+                } else {
+                    src_addr += ((y0 + row) * g_state.ti_width + x0) * bytes_per_texel + col;
+                }
+                g_state.tmem[tmem_row + col] = rdram_read_u8(g_state.rdram, src_addr);
+            }
         }
     }
 }
@@ -654,12 +700,13 @@ static void sample_texel(int tile_idx, int s, int t,
                 uint16_t texel = tmem_read_u16(addr);
                 rgba5551_to_rgba8888(texel, r, g_out, b, a);
             } else if (td.size == SIZ_32b) {
-                uint32_t addr = tmem_base + t_wrapped * line_stride + s_wrapped * 4;
-                uint32_t texel = tmem_read_u32(addr);
-                r = (texel >> 24) & 0xFF;
-                g_out = (texel >> 16) & 0xFF;
-                b = (texel >> 8) & 0xFF;
-                a = texel & 0xFF;
+                // RGBA32: R,G in low bank, B,A in high bank (+0x800)
+                uint32_t lo_addr = (tmem_base + t_wrapped * line_stride + s_wrapped * 2) & 0x7FF;
+                uint32_t hi_addr = lo_addr + 0x800;
+                r = (lo_addr + 1 < 2048) ? g_state.tmem[lo_addr] : 0;
+                g_out = (lo_addr + 1 < 2048) ? g_state.tmem[lo_addr + 1] : 0;
+                b = (hi_addr + 1 < 4096) ? g_state.tmem[hi_addr] : 0;
+                a = (hi_addr + 1 < 4096) ? g_state.tmem[hi_addr + 1] : 0;
             } else {
                 r = g_out = b = a = 0xFF;
             }
