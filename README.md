@@ -2,20 +2,27 @@
 
 Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
+## Screenshots
+
+**Title Screen** — Full DKR logo with color combiner, TEXRECT rendering, and menu text:
+
+![Title Screen](screenshots/game_01.png)
+
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
 - **Runtime**: Stable, no crashes (30+ second sessions)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551)
-- **f3ddkr HLE**: Custom microcode interpreter — rendering working (logos + 3D scene)
+- **f3ddkr HLE**: Custom microcode interpreter — title screen rendering with full color
 - **Audio**: aspMain processes 1 task then stalls (scheduler issue)
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Progress
-- **Logo screens**: N64/Rareware golden logos render via TEXRECT (RGBA32 textures)
-- **Sky**: Blue sky renders correctly via textured triangles (RGBA16)
-- **Terrain**: Island geometry renders but vertex colors are dark (CPU lighting not fully running)
+- **Title screen**: Full DKR logo with gradients, menu text (START/OPTIONS), copyright
+- **Color combiner**: N64 (A-B)*C+D formula implemented for 1-cycle and 2-cycle modes
+- **TEXRECT**: Logo/text rendering via textured rectangles (RGBA32 textures)
+- **Sky**: Blue sky renders via textured triangles (RGBA16)
 - **Alpha test**: Transparent pixels correctly skipped
 - **RGBA32 TMEM interleaving**: Properly splits R,G and B,A across TMEM banks
 
@@ -27,6 +34,7 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - Scanline triangle rasterizer with Z-buffer, backface culling, scissor
 - Texture loading: LOADBLOCK, LOADTILE, LOADTLUT (with RGBA32 interleaving)
 - Texture sampling: RGBA16/32, CI4/8, IA4/8/16, I4/8
+- N64 color combiner: (A-B)*C+D formula, 1-cycle and 2-cycle modes
 - TEXRECT with copy and 1-cycle modes
 - Fill rect in fill/1-cycle/2-cycle modes
 - Alpha test (skip alpha=0 pixels)
@@ -79,7 +87,7 @@ tracking/
   src/
     main.cpp              # Entry point, SDL init, game lifecycle
     rt64_render_context.cpp  # Software renderer + f3ddkr HLE bridge
-    f3ddkr.cpp            # f3ddkr HLE implementation (~1650 lines)
+    f3ddkr.cpp            # f3ddkr HLE implementation (~1900 lines)
     stubs.cpp             # Stub functions for unresolved symbols
     register_overlays.cpp # Overlay registration (none for DKR)
   rsp/
@@ -92,9 +100,9 @@ tracking/
 
 1. **Audio stalls after 1 task**: DKR's custom scheduler forwards only 1 VI retrace to the audio thread
 2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-3. **Dark terrain**: Island geometry has (0,0,0) vertex colors — CPU lighting may not be running fully
-4. **No color combiner**: Using shade*tex for triangles and tex-direct for TEXRECT (not proper N64 combiner)
-5. **No fog/blending**: Distance fog and alpha blending not yet implemented
+3. **Double-buffer artifact**: Title screen logo renders duplicated due to both framebuffers being displayed
+4. **No fog/blending**: Distance fog and alpha blending not yet implemented
+5. **No controller input**: Game runs but cannot receive button presses yet
 
 ## Credits
 
