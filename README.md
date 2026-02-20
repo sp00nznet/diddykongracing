@@ -2,42 +2,37 @@
 
 Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
-## Screenshots
-
-**Title Screen** — Full DKR logo with color combiner, TEXRECT rendering, and menu text:
-
-![Title Screen](screenshots/game_01.png)
-
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Stable, no crashes (30+ second sessions)
+- **Runtime**: Stable, no crashes
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
-- **Display**: Software framebuffer via SDL2 (320x237, RGBA5551)
-- **f3ddkr HLE**: Custom microcode interpreter — title screen rendering with full color
+- **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
+- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
+- **Input**: Keyboard and gamepad supported (SDL2 GameController API)
 - **Audio**: aspMain processes 1 task then stalls (scheduler issue)
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
-### Rendering Progress
-- **Title screen**: Full DKR logo with gradients, menu text (START/OPTIONS), copyright
-- **Color combiner**: N64 (A-B)*C+D formula implemented for 1-cycle and 2-cycle modes
-- **TEXRECT**: Logo/text rendering via textured rectangles (RGBA32 textures)
-- **Sky**: Blue sky renders via textured triangles (RGBA16)
+### Rendering Pipeline
+- **Color combiner**: N64 (A-B)*C+D formula, 1-cycle and 2-cycle modes
+- **RDP blender**: Full (P*A + M*B)/(A+B) formula with FORCE_BL support
+- **Distance fog**: Per-vertex fog computation via RSP HLE (G_FOG geometry mode)
+- **Alpha blending**: Framebuffer read-modify-write with configurable blend modes
 - **Alpha test**: Transparent pixels correctly skipped
-- **RGBA32 TMEM interleaving**: Properly splits R,G and B,A across TMEM banks
+- **TEXRECT**: Textured rectangles in copy and combiner modes
+- **Triangles**: Scanline rasterizer with Z-buffer, backface culling, scissor clipping
+- **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
+- **Fill rect**: Fill/1-cycle/2-cycle modes
 
-### f3ddkr HLE Features
-- Display list parser with recursive sub-DL support (G_DL, G_DMADL)
-- Segment address resolution
-- N64 fixed-point matrix loading (s15.16)
-- Vertex transform with N64-standard viewport (preserves scale sign)
-- Scanline triangle rasterizer with Z-buffer, backface culling, scissor
-- Texture loading: LOADBLOCK, LOADTILE, LOADTLUT (with RGBA32 interleaving)
-- Texture sampling: RGBA16/32, CI4/8, IA4/8/16, I4/8
-- N64 color combiner: (A-B)*C+D formula, 1-cycle and 2-cycle modes
-- TEXRECT with copy and 1-cycle modes
-- Fill rect in fill/1-cycle/2-cycle modes
-- Alpha test (skip alpha=0 pixels)
+### Controls
+| Key | N64 Button | | Key | N64 Button |
+|-----|------------|-|-----|------------|
+| Return/Space | A | | Q | L Trigger |
+| LShift | B | | E | R Trigger |
+| Z | Z Trigger | | I/K/J/L | C-Up/Down/Left/Right |
+| Escape | Start | | Arrows | D-Pad |
+
+SDL GameController (Xbox-style) gamepads are also supported.
 
 ## Building
 
@@ -85,9 +80,9 @@ tracking/
   include/
     f3ddkr.h              # f3ddkr microcode definitions and state
   src/
-    main.cpp              # Entry point, SDL init, game lifecycle
+    main.cpp              # Entry point, SDL init, input, game lifecycle
     rt64_render_context.cpp  # Software renderer + f3ddkr HLE bridge
-    f3ddkr.cpp            # f3ddkr HLE implementation (~1900 lines)
+    f3ddkr.cpp            # f3ddkr HLE implementation
     stubs.cpp             # Stub functions for unresolved symbols
     register_overlays.cpp # Overlay registration (none for DKR)
   rsp/
@@ -100,9 +95,7 @@ tracking/
 
 1. **Audio stalls after 1 task**: DKR's custom scheduler forwards only 1 VI retrace to the audio thread
 2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-3. **Double-buffer artifact**: Title screen logo renders duplicated due to both framebuffers being displayed
-4. **No fog/blending**: Distance fog and alpha blending not yet implemented
-5. **No controller input**: Game runs but cannot receive button presses yet
+3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
 
 ## Credits
 
