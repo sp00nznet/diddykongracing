@@ -606,6 +606,14 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
             tv.sy = 0;
         }
 
+        // Compute per-vertex fog factor when G_FOG is enabled
+        // RSP formula: fog = clamp((W * fog_multiplier >> 16) + fog_offset, 0, 255)
+        // Fog factor replaces vertex alpha for blender's A_SHADE input
+        if (g_state.geometry_mode & G_FOG) {
+            int fog_val = (int)(tv.cw * g_state.fog_multiplier) / 65536 + g_state.fog_offset;
+            tv.a = (uint8_t)std::clamp(fog_val, 0, 255);
+        }
+
         loaded++;
     }
     g_state.num_vertices = start_idx + loaded;
