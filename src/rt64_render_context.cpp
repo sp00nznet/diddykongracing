@@ -200,6 +200,11 @@ public:
         );
 
         if (fb_surface) {
+            // Clear window surface to black before blit to prevent stale content
+            // from previous frames showing through (fixes double-buffer artifact
+            // when game's scissor-clipped fill_rect doesn't clear the entire screen)
+            SDL_FillRect(window_surface, nullptr, SDL_MapRGB(window_surface->format, 0, 0, 0));
+
             // Scale blit to fill window
             SDL_BlitScaled(fb_surface, nullptr, window_surface, nullptr);
             SDL_FreeSurface(fb_surface);
