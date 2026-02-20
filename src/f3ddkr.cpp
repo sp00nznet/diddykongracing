@@ -112,6 +112,9 @@ static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_
     if (g_state.ci_addr == 0) return;
     if (x < g_state.sc_xl || x >= g_state.sc_xh || y < g_state.sc_yl || y >= g_state.sc_yh) return;
 
+    // Alpha test: skip fully transparent pixels
+    if (a == 0) return;
+
     // Log first few non-black pixel writes for debugging
     if (g_dl_trace && g_fb_write_log_count < 10 && (r > 4 || g > 4 || b > 4)) {
         fprintf(stderr, "[TRACE] PIXEL @(%d,%d) rgba=(%d,%d,%d,%d) ci=0x%06X\n",
@@ -282,8 +285,8 @@ static void load_matrix(uint32_t rdram_addr, int index) {
             nonzero_logged++;
         }
     }
-    // Log summary of matrix loads every 200 loads and on specific DLs
-    if (total_mtx_loads % 200 == 0) {
+    // Log summary of matrix loads periodically (reduce spam)
+    if (total_mtx_loads == 1000 || total_mtx_loads == 10000 || total_mtx_loads % 100000 == 0) {
         fprintf(stderr, "[F3DDKR] MTX stats: %d loads, %d non-degenerate (DL#%d)\n",
                 total_mtx_loads, nonzero_count, g_state.dl_total_count);
         fflush(stderr);
@@ -1146,6 +1149,17 @@ static void cmd_texrect(uint32_t w0, uint32_t w1, uint32_t st_word, uint32_t dsd
     uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
     bool copy_mode = (cycle_type == G_CYC_COPY);
 
+    static int texrect_log = 0;
+    bool do_tr_log = (texrect_log < 20);
+
+    if (do_tr_log) {
+        const TileDescriptor& td = g_state.tiles[tile_idx];
+        fprintf(stderr, "[TEXRECT] #%d rect=(%d,%d)-(%d,%d) tile=%d fmt=%d siz=%d tmem=0x%03X line=%d cycle=%d env=0x%08X\n",
+                texrect_log, x0, y0, x1, y1, tile_idx, td.format, td.size, td.tmem_addr, td.line, cycle_type, g_state.env_color);
+        fflush(stderr);
+    }
+
+    int texrect_pix = 0;
     float cur_t = ft;
     for (int y = y0; y <= y1; y++) {
         float cur_s = fs;
@@ -1155,20 +1169,22 @@ static void cmd_texrect(uint32_t w0, uint32_t w1, uint32_t st_word, uint32_t dsd
             int ti = (int)floorf(cur_t);
             sample_texel(tile_idx, si, ti, tr, tg, tb, ta);
 
-            if (copy_mode) {
-                // In copy mode, write texel directly
-                write_fb_pixel(x, y, tr, tg, tb, ta);
-            } else {
-                // Modulate by env color for text rendering (G_CC_ENV_DECALA pattern)
-                uint8_t er = (g_state.env_color >> 24) & 0xFF;
-                uint8_t eg = (g_state.env_color >> 16) & 0xFF;
-                uint8_t eb = (g_state.env_color >> 8) & 0xFF;
-                // Use texture alpha, env color RGB
-                write_fb_pixel(x, y, er, eg, eb, ta);
+            if (do_tr_log && texrect_pix < 3) {
+                fprintf(stderr, "  [TEXRECT] pix(%d,%d) s=%d t=%d tex=(%d,%d,%d,%d)\n",
+                        x, y, si, ti, tr, tg, tb, ta);
+                fflush(stderr);
             }
+
+            // Write texel directly - texture contains actual RGBA colors
+            // TODO: implement proper N64 color combiner for accurate rendering
+            write_fb_pixel(x, y, tr, tg, tb, ta);
+            texrect_pix++;
             cur_s += fdsdx;
         }
         cur_t += fdtdy;
+    }
+    if (do_tr_log) {
+        texrect_log++;
     }
 }
 
@@ -1610,6 +1626,29 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
                 g_state.sc_xl, g_state.sc_yl, g_state.sc_xh, g_state.sc_yh,
                 g_state.ci_addr, g_state.active_matrix_index,
                 g_state.dl_sx_min, g_state.dl_sx_max, g_state.dl_sy_min, g_state.dl_sy_max);
+        fflush(stderr);
+    }
+
+    // Check CI framebuffer content after early DLs (to verify TEXRECT writes)
+    if (g_state.dl_total_count <= 10 && g_state.ci_addr != 0 && g_state.ci_size == SIZ_16b && pix_this_dl > 0) {
+        int non_fill = 0, non_zero = 0;
+        uint16_t first_val = 0;
+        int first_x = -1, first_y = -1;
+        uint32_t fb_off = g_state.ci_addr;
+        for (int y = 0; y < 240; y++) {
+            for (int x = 0; x < (int)g_state.ci_width; x++) {
+                uint16_t px = rdram_read_u16(g_state.rdram, fb_off + (y * g_state.ci_width + x) * 2);
+                if (px != 0) non_zero++;
+                if (px > 0x0001 && px != 0xFFFC) {
+                    non_fill++;
+                    if (non_fill == 1) { first_val = px; first_x = x; first_y = y; }
+                }
+            }
+        }
+        fprintf(stderr, "[F3DDKR] CI FB check after DL#%d: ci=0x%06X non_zero=%d non_fill=%d",
+                g_state.dl_total_count, g_state.ci_addr, non_zero, non_fill);
+        if (first_x >= 0) fprintf(stderr, " first=0x%04X@(%d,%d)", first_val, first_x, first_y);
+        fprintf(stderr, "\n");
         fflush(stderr);
     }
 }
