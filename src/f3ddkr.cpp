@@ -125,6 +125,78 @@ static inline void rgba5551_to_rgba8888(uint16_t c, uint8_t& r, uint8_t& g, uint
     a = (c & 1) ? 0xFF : 0;
 }
 
+// ============================================================
+// RDP Blender
+// ============================================================
+// Runs one cycle of the blender: out = (P * A + M * B) / (A + B)
+// in_r/g/b = CLR_IN for this cycle (CC output for cycle 0, cycle 0 output for cycle 1)
+// in_a = A_IN (CC alpha, constant across cycles)
+// mem_r/g/b/a = framebuffer pixel (CLR_MEM / A_MEM)
+// shade_a = raw vertex alpha (for A_SHADE, typically fog factor)
+static inline void blender_cycle(int p_sel, int a_sel, int m_sel, int b_sel,
+                                  int in_r, int in_g, int in_b, int in_a,
+                                  int mem_r, int mem_g, int mem_b, int mem_a,
+                                  int shade_a,
+                                  uint8_t& out_r, uint8_t& out_g, uint8_t& out_b) {
+    // Select P color
+    int pr, pg, pb;
+    switch (p_sel) {
+        case G_BL_CLR_IN:  pr = in_r; pg = in_g; pb = in_b; break;
+        case G_BL_CLR_MEM: pr = mem_r; pg = mem_g; pb = mem_b; break;
+        case G_BL_CLR_BL:  pr = (g_state.blend_color >> 24) & 0xFF;
+                           pg = (g_state.blend_color >> 16) & 0xFF;
+                           pb = (g_state.blend_color >> 8) & 0xFF; break;
+        case G_BL_CLR_FOG: pr = (g_state.fog_color >> 24) & 0xFF;
+                           pg = (g_state.fog_color >> 16) & 0xFF;
+                           pb = (g_state.fog_color >> 8) & 0xFF; break;
+        default: pr = pg = pb = 0; break;
+    }
+
+    // Select A factor
+    int af;
+    switch (a_sel) {
+        case G_BL_A_IN:    af = in_a; break;
+        case G_BL_A_FOG:   af = (g_state.fog_color & 0xFF); break;
+        case G_BL_A_SHADE: af = shade_a; break;
+        default:           af = 0; break;
+    }
+
+    // Select M color
+    int mr, mg, mb;
+    switch (m_sel) {
+        case G_BL_CLR_IN:  mr = in_r; mg = in_g; mb = in_b; break;
+        case G_BL_CLR_MEM: mr = mem_r; mg = mem_g; mb = mem_b; break;
+        case G_BL_CLR_BL:  mr = (g_state.blend_color >> 24) & 0xFF;
+                           mg = (g_state.blend_color >> 16) & 0xFF;
+                           mb = (g_state.blend_color >> 8) & 0xFF; break;
+        case G_BL_CLR_FOG: mr = (g_state.fog_color >> 24) & 0xFF;
+                           mg = (g_state.fog_color >> 16) & 0xFF;
+                           mb = (g_state.fog_color >> 8) & 0xFF; break;
+        default: mr = mg = mb = 0; break;
+    }
+
+    // Select B factor
+    int bf;
+    switch (b_sel) {
+        case G_BL_1MA:   bf = 255 - af; break;
+        case G_BL_A_MEM: bf = mem_a; break;
+        case G_BL_1:     bf = 255; break;
+        default:         bf = 0; break;
+    }
+
+    // Blender formula: out = (P * A + M * B) / (A + B)
+    int denom = af + bf;
+    if (denom > 0) {
+        out_r = (uint8_t)std::clamp((pr * af + mr * bf) / denom, 0, 255);
+        out_g = (uint8_t)std::clamp((pg * af + mg * bf) / denom, 0, 255);
+        out_b = (uint8_t)std::clamp((pb * af + mb * bf) / denom, 0, 255);
+    } else {
+        out_r = (uint8_t)pr;
+        out_g = (uint8_t)pg;
+        out_b = (uint8_t)pb;
+    }
+}
+
 // Write a pixel to the framebuffer with RDP blender
 // shade_a: raw vertex alpha (pre-combiner), used for A_SHADE blender input
 static int g_pixel_write_count = 0;
@@ -137,84 +209,46 @@ static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_
     // Alpha test: skip fully transparent pixels
     if (a == 0) return;
 
-    // RDP Blender: applies when FORCE_BL is set in 1-cycle or 2-cycle mode
+    // RDP Blender runs in 1-cycle and 2-cycle modes
+    // In 2-cycle mode: cycle 0 handles fog, cycle 1 handles framebuffer blend
+    // The blender always runs its formula (not gated on FORCE_BL alone)
     uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
-    bool do_blend = (cycle_type == G_CYC_1CYCLE || cycle_type == G_CYC_2CYCLE) &&
-                    (g_state.other_mode_l & F3DDKR_FORCE_BL);
 
-    if (do_blend) {
-        // Read existing framebuffer pixel
-        uint8_t mem_r, mem_g, mem_b, mem_a;
+    if (cycle_type == G_CYC_1CYCLE || cycle_type == G_CYC_2CYCLE) {
+        // Read framebuffer pixel (needed for CLR_MEM / A_MEM references)
+        uint8_t mem_r = 0, mem_g = 0, mem_b = 0, mem_a = 0;
         read_fb_pixel(x, y, mem_r, mem_g, mem_b, mem_a);
 
-        // Get blender mux settings
-        // In 1-cycle mode: use cycle 0 (c1) settings
-        // In 2-cycle mode: use cycle 1 (c2) settings for final output
-        int p_sel, a_sel, m_sel, b_sel;
+        // CC output is the initial "in" color
+        int in_r = r, in_g = g, in_b = b;
+        int in_a = a;
+
         if (cycle_type == G_CYC_2CYCLE) {
-            p_sel = (g_state.other_mode_l >> BL_M1A_1_SHIFT) & 3;
-            a_sel = (g_state.other_mode_l >> BL_M1B_1_SHIFT) & 3;
-            m_sel = (g_state.other_mode_l >> BL_M2A_1_SHIFT) & 3;
-            b_sel = (g_state.other_mode_l >> BL_M2B_1_SHIFT) & 3;
+            // Cycle 0: typically blends fog with CC output
+            int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
+            int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
+            int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
+            int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
+            blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
+                          mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
+            // Cycle 0 output becomes CLR_IN for cycle 1
+            in_r = r; in_g = g; in_b = b;
+
+            // Cycle 1: blends cycle 0 result with framebuffer
+            int p1 = (g_state.other_mode_l >> BL_M1A_1_SHIFT) & 3;
+            int a1 = (g_state.other_mode_l >> BL_M1B_1_SHIFT) & 3;
+            int m1 = (g_state.other_mode_l >> BL_M2A_1_SHIFT) & 3;
+            int b1 = (g_state.other_mode_l >> BL_M2B_1_SHIFT) & 3;
+            blender_cycle(p1, a1, m1, b1, in_r, in_g, in_b, in_a,
+                          mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
         } else {
-            p_sel = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
-            a_sel = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
-            m_sel = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
-            b_sel = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
-        }
-
-        // Select P color (pixel source)
-        int pr, pg, pb;
-        switch (p_sel) {
-            case G_BL_CLR_IN:  pr = r; pg = g; pb = b; break;
-            case G_BL_CLR_MEM: pr = mem_r; pg = mem_g; pb = mem_b; break;
-            case G_BL_CLR_BL:  pr = (g_state.blend_color >> 24) & 0xFF;
-                               pg = (g_state.blend_color >> 16) & 0xFF;
-                               pb = (g_state.blend_color >> 8) & 0xFF; break;
-            case G_BL_CLR_FOG: pr = (g_state.fog_color >> 24) & 0xFF;
-                               pg = (g_state.fog_color >> 16) & 0xFF;
-                               pb = (g_state.fog_color >> 8) & 0xFF; break;
-            default: pr = pg = pb = 0; break;
-        }
-
-        // Select A factor
-        int af;
-        switch (a_sel) {
-            case G_BL_A_IN:    af = a; break;
-            case G_BL_A_FOG:   af = (g_state.fog_color & 0xFF); break;
-            case G_BL_A_SHADE: af = shade_a; break;
-            default:           af = 0; break;
-        }
-
-        // Select M color (memory/blend source)
-        int mr, mg, mb;
-        switch (m_sel) {
-            case G_BL_CLR_IN:  mr = r; mg = g; mb = b; break;
-            case G_BL_CLR_MEM: mr = mem_r; mg = mem_g; mb = mem_b; break;
-            case G_BL_CLR_BL:  mr = (g_state.blend_color >> 24) & 0xFF;
-                               mg = (g_state.blend_color >> 16) & 0xFF;
-                               mb = (g_state.blend_color >> 8) & 0xFF; break;
-            case G_BL_CLR_FOG: mr = (g_state.fog_color >> 24) & 0xFF;
-                               mg = (g_state.fog_color >> 16) & 0xFF;
-                               mb = (g_state.fog_color >> 8) & 0xFF; break;
-            default: mr = mg = mb = 0; break;
-        }
-
-        // Select B factor
-        int bf;
-        switch (b_sel) {
-            case G_BL_1MA:   bf = 255 - af; break;
-            case G_BL_A_MEM: bf = mem_a; break;
-            case G_BL_1:     bf = 255; break;
-            default:         bf = 0; break;
-        }
-
-        // Blender formula: out = (P * A + M * B) / (A + B)
-        int denom = af + bf;
-        if (denom > 0) {
-            r = (uint8_t)std::clamp((pr * af + mr * bf) / denom, 0, 255);
-            g = (uint8_t)std::clamp((pg * af + mg * bf) / denom, 0, 255);
-            b = (uint8_t)std::clamp((pb * af + mb * bf) / denom, 0, 255);
+            // 1-cycle: single blend pass
+            int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
+            int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
+            int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
+            int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
+            blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
+                          mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
         }
         a = 255; // blended pixel has full coverage
     }
