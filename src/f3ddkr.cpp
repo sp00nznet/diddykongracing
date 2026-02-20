@@ -1904,3 +1904,11 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
         fflush(stderr);
     }
 }
+
+uint32_t f3ddkr_get_last_ci_addr() {
+    return g_state.ci_addr;
+}
+
+uint16_t f3ddkr_get_last_ci_width() {
+    return g_state.ci_width;
+}

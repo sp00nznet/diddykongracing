@@ -224,4 +224,9 @@ struct F3DDKRState {
 
 void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size);
 
+// Get the last framebuffer address and dimensions rendered by the HLE
+// Returns the physical address of the color image, or 0 if nothing rendered yet
+uint32_t f3ddkr_get_last_ci_addr();
+uint16_t f3ddkr_get_last_ci_width();
+
 #endif // F3DDKR_H
