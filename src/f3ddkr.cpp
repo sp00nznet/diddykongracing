@@ -442,10 +442,10 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
             tv.sy = 0;
         }
 
-        // DL trace: log first few vertices with transform results + color
-        if (g_dl_trace && i < 3) {
-            fprintf(stderr, "[TRACE] VTX[%d]: raw=(%d,%d,%d) rgba=(%d,%d,%d,%d) mtx=%d clip=(%.2f,%.2f,%.2f,%.2f) screen=(%.1f,%.1f)\n",
-                    start_idx + i, vx, vy, vz, vr, vg, vb, va, g_state.active_matrix_index,
+        // DL trace: log first few vertices with transform results + color + address
+        if (g_dl_trace && i < 5) {
+            fprintf(stderr, "[TRACE] VTX[%d] @0x%06X: raw=(%d,%d,%d) rgba=(%d,%d,%d,%d) mtx=%d clip=(%.2f,%.2f,%.2f,%.2f) screen=(%.1f,%.1f)\n",
+                    start_idx + i, addr + i * 10, vx, vy, vz, vr, vg, vb, va, g_state.active_matrix_index,
                     tv.cx, tv.cy, tv.cz, tv.cw, tv.sx, tv.sy);
             fflush(stderr);
         }
@@ -1131,9 +1131,21 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
         // Log first few rasterized triangles (both with and without pixels)
         static int rast_log = 0, rast_zero_log = 0;
         if (pix_from_tri > 0 && rast_log < 10) {
-            fprintf(stderr, "[F3DDKR] RAST_TRI DL#%d: %d pixels, screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) flags=0x%02X\n",
-                    g_state.dl_total_count, pix_from_tri,
-                    v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy, flags);
+            // Sample texel at UV center of triangle for debug
+            uint8_t dbg_tr=0, dbg_tg=0, dbg_tb=0, dbg_ta=0;
+            if (tex_enabled) {
+                float avg_u = (u0 + u1 + u2) / 3.0f;
+                float avg_v = (v0_tc + v1_tc + v2_tc) / 3.0f;
+                sample_texel(0, (int)avg_u, (int)avg_v, dbg_tr, dbg_tg, dbg_tb, dbg_ta);
+            }
+            const TileDescriptor& dbg_td = g_state.tiles[0];
+            fprintf(stderr, "[F3DDKR] RAST_TRI DL#%d: %d pix tex=%d tile(fmt=%d siz=%d tmem=0x%03X line=%d) "
+                    "texsample=(%d,%d,%d,%d) shade=(%d,%d,%d) combine=0x%08X_%08X\n",
+                    g_state.dl_total_count, pix_from_tri, tex_enabled,
+                    dbg_td.format, dbg_td.size, dbg_td.tmem_addr, dbg_td.line,
+                    dbg_tr, dbg_tg, dbg_tb, dbg_ta,
+                    v0.r, v0.g, v0.b,
+                    (uint32_t)(g_state.combine_mode >> 32), (uint32_t)(g_state.combine_mode & 0xFFFFFFFF));
             fflush(stderr);
             rast_log++;
         }
@@ -1635,8 +1647,8 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
     g_state.dl_total_count++;
 
     // Enable trace for specific DLs (representative DLs with geometry)
-    g_dl_trace = (g_state.dl_total_count == 50 || g_state.dl_total_count == 200 ||
-                  g_state.dl_total_count == 500);
+    g_dl_trace = (g_state.dl_total_count == 100 || g_state.dl_total_count == 300 ||
+                  g_state.dl_total_count == 600);
     if (g_dl_trace) g_fb_write_log_count = 0;
 
     if (g_state.dl_total_count <= 5 || (g_state.dl_total_count <= 100 && g_state.dl_total_count % 20 == 0)) {
