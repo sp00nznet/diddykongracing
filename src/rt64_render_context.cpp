@@ -113,8 +113,19 @@ public:
         if (screen_width > 640) screen_width = 640;
         if (screen_height > 480) screen_height = 480;
 
-        // Convert VI_ORIGIN to RDRAM offset
-        uint32_t fb_offset = vi_origin & 0x7FFFFF;
+        // Use the HLE CI address instead of VI_ORIGIN to avoid double-buffer artifacts.
+        // The game may not properly alternate framebuffers, and VI_ORIGIN can point to
+        // a stale buffer that wasn't rendered by our HLE.
+        uint32_t hle_ci = f3ddkr_get_last_ci_addr();
+        uint32_t fb_offset;
+        if (hle_ci != 0) {
+            fb_offset = hle_ci & 0x7FFFFF;
+            // Override width from HLE if available
+            uint16_t hle_width = f3ddkr_get_last_ci_width();
+            if (hle_width > 0) screen_width = hle_width;
+        } else {
+            fb_offset = vi_origin & 0x7FFFFF;
+        }
 
         uint32_t bytes_per_pixel = (pixel_size == 3) ? 4 : 2;
         uint32_t fb_size = screen_width * screen_height * bytes_per_pixel;
