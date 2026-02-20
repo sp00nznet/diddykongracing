@@ -1669,30 +1669,7 @@ L_8006F9B4:
     ctx->r29 = ADD32(ctx->r29, 0X8);
 ;}
 RECOMP_FUNC void mtxf_to_mtx(uint8_t* rdram, recomp_context* ctx) {
-    // --- DIAGNOSTIC: dump input MtxF floats ---
-    {
-        static int mtx_cvt_count = 0;
-        if (mtx_cvt_count < 30) {
-            gpr src = ctx->r4;  // MtxF pointer (VRAM)
-            gpr dst = ctx->r5;  // Mtx pointer (VRAM)
-            uint32_t phys_in = (uint32_t)((src) - (gpr)0xFFFFFFFF80000000LL);
-            uint32_t phys_out = (uint32_t)((dst) - (gpr)0xFFFFFFFF80000000LL);
-            fprintf(stderr, "[MTX_CVT] #%d MtxF@0x%06X -> Mtx@0x%06X\n",
-                    mtx_cvt_count, phys_in, phys_out);
-            for (int row = 0; row < 4; row++) {
-                fprintf(stderr, "  [");
-                for (int col = 0; col < 4; col++) {
-                    union { int32_t i; float f; } conv;
-                    conv.i = *(int32_t*)(rdram + ((src + (row * 4 + col) * 4) - (gpr)0xFFFFFFFF80000000LL));
-                    fprintf(stderr, " %12.6f", conv.f);
-                }
-                fprintf(stderr, " ]\n");
-            }
-            fflush(stderr);
-            mtx_cvt_count++;
-        }
-    }
-    // --- END DIAGNOSTIC ---
+    // mtxf_to_mtx diagnostic removed (confirmed working)
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     // 0x8006FAB0: lui         $at, 0x4780
@@ -1800,29 +1777,7 @@ L_8006FABC:
     // 0x8006FB40: nop
 
     skip_0:
-    // --- OUTPUT DIAGNOSTIC: dump Mtx result ---
-    {
-        static int mtx_out_count = 0;
-        if (mtx_out_count < 30) {
-            // After 4 iterations of addiu +8, r5 = original + 32
-            gpr mtx_base = ctx->r5 - 32;
-            uint32_t phys = (uint32_t)(mtx_base - (gpr)0xFFFFFFFF80000000LL);
-            fprintf(stderr, "[MTX_CVT] Output Mtx@0x%06X INT:", phys);
-            for (int w = 0; w < 8; w++) {
-                uint32_t val = (uint32_t)*(int32_t*)(rdram + (mtx_base + w * 4 - (gpr)0xFFFFFFFF80000000LL));
-                fprintf(stderr, " %08X", val);
-            }
-            fprintf(stderr, "\n                          FRC:");
-            for (int w = 0; w < 8; w++) {
-                uint32_t val = (uint32_t)*(int32_t*)(rdram + (mtx_base + 32 + w * 4 - (gpr)0xFFFFFFFF80000000LL));
-                fprintf(stderr, " %08X", val);
-            }
-            fprintf(stderr, "\n");
-            fflush(stderr);
-            mtx_out_count++;
-        }
-    }
-    // --- END OUTPUT DIAGNOSTIC ---
+    // mtxf_to_mtx output diagnostic removed (confirmed working)
     // 0x8006FB44: jr          $ra
     // 0x8006FB48: nop
 

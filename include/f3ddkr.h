@@ -211,6 +211,11 @@ struct F3DDKRState {
     int dl_total_count;     // total DLs processed
     int tri_total_count;    // total triangles submitted
     int cmd_counts[256];    // per-opcode count for logging
+
+    // Per-DL triangle tracking
+    float dl_sx_min, dl_sx_max, dl_sy_min, dl_sy_max;
+    int dl_tri_inbounds, dl_tri_outbounds, dl_tri_culled;
+    int dl_tri_rasterized, dl_tri_pixels;
 };
 
 // ============================================================
