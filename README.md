@@ -2,6 +2,8 @@
 
 Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
+![Title Screen](screenshots/game_06.png)
+
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
@@ -10,7 +12,7 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
 - **Input**: Keyboard and gamepad supported (SDL2 GameController API)
-- **Audio**: aspMain processes 1 task then stalls (scheduler issue)
+- **Audio**: aspMain RSP microcode processing continuously; SDL2 audio output wired up
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline
@@ -23,6 +25,12 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - **Triangles**: Scanline rasterizer with Z-buffer, backface culling, scissor clipping
 - **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
 - **Fill rect**: Fill/1-cycle/2-cycle modes
+
+### Audio Pipeline
+- **aspMain**: Recompiled RSP audio microcode (MIPS → C++)
+- **Resampler**: Fixed infinite loop in op=5 handler (setup/body label split)
+- **Scheduler**: Fixed SI message requeue starvation that blocked SP/DP/VI delivery
+- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS)
 
 ### Controls
 | Key | N64 Button | | Key | N64 Button |
@@ -93,7 +101,7 @@ tracking/
 
 ## Known Issues
 
-1. **Audio stalls after 1 task**: DKR's custom scheduler forwards only 1 VI retrace to the audio thread
+1. **Audio output not yet verified**: aspMain processes tasks but audible playback needs testing
 2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
 3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
 

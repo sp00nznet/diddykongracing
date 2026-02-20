@@ -209,48 +209,61 @@ static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_
     // Alpha test: skip fully transparent pixels
     if (a == 0) return;
 
-    // RDP Blender runs in 1-cycle and 2-cycle modes
-    // In 2-cycle mode: cycle 0 handles fog, cycle 1 handles framebuffer blend
-    // The blender always runs its formula (not gated on FORCE_BL alone)
+    // RDP Blender
+    // In 2-cycle mode: cycle 0 always runs (fog blend), cycle 1 only with FORCE_BL
+    // In 1-cycle mode: blender only runs with FORCE_BL
+    // Without FORCE_BL, full-coverage pixels bypass the final framebuffer blend
+    // (on real N64, partial-coverage edge pixels would still blend, but we don't track coverage)
     uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
+    bool force_bl = (g_state.other_mode_l & F3DDKR_FORCE_BL) != 0;
 
-    if (cycle_type == G_CYC_1CYCLE || cycle_type == G_CYC_2CYCLE) {
-        // Read framebuffer pixel (needed for CLR_MEM / A_MEM references)
-        uint8_t mem_r = 0, mem_g = 0, mem_b = 0, mem_a = 0;
-        read_fb_pixel(x, y, mem_r, mem_g, mem_b, mem_a);
-
-        // CC output is the initial "in" color
+    if (cycle_type == G_CYC_2CYCLE) {
+        // Cycle 0: always runs in 2-cycle mode (handles fog blending)
+        // This is an intermediate step - its output feeds cycle 1 as CLR_IN
         int in_r = r, in_g = g, in_b = b;
         int in_a = a;
 
-        if (cycle_type == G_CYC_2CYCLE) {
-            // Cycle 0: typically blends fog with CC output
-            int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
-            int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
-            int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
-            int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
-            blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
-                          mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
-            // Cycle 0 output becomes CLR_IN for cycle 1
-            in_r = r; in_g = g; in_b = b;
+        // For cycle 0, we need mem pixel if cycle 0 references CLR_MEM
+        uint8_t mem_r = 0, mem_g = 0, mem_b = 0, mem_a = 0;
+        int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
+        int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
+        int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
+        int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
 
-            // Cycle 1: blends cycle 0 result with framebuffer
+        // Only read framebuffer if cycle 0 or FORCE_BL cycle 1 needs it
+        if (p0 == G_BL_CLR_MEM || m0 == G_BL_CLR_MEM || b0 == G_BL_A_MEM || force_bl) {
+            read_fb_pixel(x, y, mem_r, mem_g, mem_b, mem_a);
+        }
+
+        blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
+                      mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
+
+        if (force_bl) {
+            // Cycle 1: blend cycle 0 result with framebuffer
+            in_r = r; in_g = g; in_b = b;
             int p1 = (g_state.other_mode_l >> BL_M1A_1_SHIFT) & 3;
             int a1 = (g_state.other_mode_l >> BL_M1B_1_SHIFT) & 3;
             int m1 = (g_state.other_mode_l >> BL_M2A_1_SHIFT) & 3;
             int b1 = (g_state.other_mode_l >> BL_M2B_1_SHIFT) & 3;
             blender_cycle(p1, a1, m1, b1, in_r, in_g, in_b, in_a,
                           mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
-        } else {
-            // 1-cycle: single blend pass
-            int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
-            int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
-            int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
-            int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
-            blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
-                          mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
         }
-        a = 255; // blended pixel has full coverage
+        // Without FORCE_BL, cycle 0 fog result is final (P from cycle 1 = CLR_IN = cycle 0 output)
+        a = 255;
+    } else if (cycle_type == G_CYC_1CYCLE && force_bl) {
+        // 1-cycle with FORCE_BL: single blend pass with framebuffer
+        int in_r = r, in_g = g, in_b = b;
+        int in_a = a;
+        uint8_t mem_r = 0, mem_g = 0, mem_b = 0, mem_a = 0;
+        read_fb_pixel(x, y, mem_r, mem_g, mem_b, mem_a);
+
+        int p0 = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
+        int a0 = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
+        int m0 = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
+        int b0 = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
+        blender_cycle(p0, a0, m0, b0, in_r, in_g, in_b, in_a,
+                      mem_r, mem_g, mem_b, mem_a, shade_a, r, g, b);
+        a = 255;
     }
 
     // Write final pixel to framebuffer
@@ -469,11 +482,11 @@ static inline void write_zbuf(int x, int y, uint16_t z) {
 // Phase 1: Fill Rect
 // ============================================================
 static void cmd_fill_rect(uint32_t w0, uint32_t w1) {
-    // 10.2 fixed-point coordinates
-    int lrx = (w0 >> 14) & 0x3FF;
-    int lry = w0 & 0x3FF;
-    int ulx = (w1 >> 14) & 0x3FF;
-    int uly = w1 & 0x3FF;
+    // 10.2 fixed-point coordinates (12 bits each in w0/w1)
+    int lrx = (w0 >> 12) & 0xFFF;
+    int lry = w0 & 0xFFF;
+    int ulx = (w1 >> 12) & 0xFFF;
+    int uly = w1 & 0xFFF;
 
     // Convert from 10.2 to integer (truncate fractional)
     // Note: G_FILLRECT on N64 — upper-left is inclusive, lower-right is exclusive
@@ -1348,7 +1361,6 @@ static void cmd_setcimg(uint32_t w0, uint32_t w1) {
     g_state.ci_width = (w0 & 0xFFF) + 1;
     uint32_t old_ci = g_state.ci_addr;
     g_state.ci_addr = resolve_segment(w1);
-    // Log CI changes only for first few
     if (g_state.cmd_counts[F3DDKR_G_SETCIMG] < LOG_FIRST_N) {
         fprintf(stderr, "[F3DDKR] G_SETCIMG: phys=0x%06X (was 0x%06X) fmt=%d siz=%d w=%d\n",
                 g_state.ci_addr, old_ci, g_state.ci_format, g_state.ci_size, g_state.ci_width);
