@@ -1011,14 +1011,46 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
             if (is_late_tri) late_tri_logged++;
         }
 
+        // Track screen coordinate ranges for per-DL stats
+        {
+            float sxmin = std::min({v0.sx, v1.sx, v2.sx});
+            float sxmax = std::max({v0.sx, v1.sx, v2.sx});
+            float symin = std::min({v0.sy, v1.sy, v2.sy});
+            float symax = std::max({v0.sy, v1.sy, v2.sy});
+            if (sxmin < g_state.dl_sx_min) g_state.dl_sx_min = sxmin;
+            if (sxmax > g_state.dl_sx_max) g_state.dl_sx_max = sxmax;
+            if (symin < g_state.dl_sy_min) g_state.dl_sy_min = symin;
+            if (symax > g_state.dl_sy_max) g_state.dl_sy_max = symax;
+            bool inbounds = (sxmax >= g_state.sc_xl && sxmin < g_state.sc_xh &&
+                            symax >= g_state.sc_yl && symin < g_state.sc_yh);
+            if (inbounds) g_state.dl_tri_inbounds++;
+            else g_state.dl_tri_outbounds++;
+        }
+
         // Skip if any vertex is behind camera (w <= 0)
-        if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
+        if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) {
+            g_state.dl_tri_culled++;
+            continue;
+        }
 
         // Backface culling using screen-space cross product
         float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
+        // DEBUG: Track backface vs behind-camera culling separately
+        static int bf_cull_count = 0;
         if (!(flags & TRI_BACKFACE_DRAW)) {
-            // Cull back-facing triangles
-            if (cross <= 0.0f) continue;
+            if (cross <= 0.0f) {
+                g_state.dl_tri_culled++;
+                bf_cull_count++;
+                // Log first few backface culls with details
+                if (bf_cull_count <= 5) {
+                    fprintf(stderr, "[F3DDKR] BF_CULL#%d DL#%d: flags=0x%02X cross=%.1f "
+                            "screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)\n",
+                            bf_cull_count, g_state.dl_total_count, flags, cross,
+                            v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy);
+                    fflush(stderr);
+                }
+                continue;
+            }
         }
 
         // UV coordinates from triangle struct (s10.5 fixed-point → s16)
@@ -1040,8 +1072,32 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
             v2_tc = raw_v2 / 32.0f;
         }
 
+        int pix_before_tri = g_pixel_write_count;
         rasterize_triangle(v0, v1, v2, u0, v0_tc, u1, v1_tc, u2, v2_tc,
                            tex_enabled != 0, 0); // tile 0 by default
+        int pix_from_tri = g_pixel_write_count - pix_before_tri;
+        g_state.dl_tri_rasterized++;
+        g_state.dl_tri_pixels += pix_from_tri;
+        // Log first few rasterized triangles (both with and without pixels)
+        static int rast_log = 0, rast_zero_log = 0;
+        if (pix_from_tri > 0 && rast_log < 10) {
+            fprintf(stderr, "[F3DDKR] RAST_TRI DL#%d: %d pixels, screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) flags=0x%02X\n",
+                    g_state.dl_total_count, pix_from_tri,
+                    v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy, flags);
+            fflush(stderr);
+            rast_log++;
+        }
+        // Log first few 0-pixel rasterized triangles (for late DLs)
+        if (pix_from_tri == 0 && g_state.dl_total_count >= 600 && rast_zero_log < 10) {
+            fprintf(stderr, "[F3DDKR] RAST_ZERO DL#%d: screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) "
+                    "cw=(%.1f,%.1f,%.1f) cross=%.1f flags=0x%02X sci=(%d,%d)-(%d,%d)\n",
+                    g_state.dl_total_count,
+                    v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy,
+                    v0.cw, v1.cw, v2.cw, cross, flags,
+                    g_state.sc_xl, g_state.sc_yl, g_state.sc_xh, g_state.sc_yh);
+            fflush(stderr);
+            rast_zero_log++;
+        }
     }
 
     // Reset vertex index after drawing (matches GLideN64)
@@ -1515,8 +1571,9 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
 
     g_state.dl_total_count++;
 
-    // Enable trace for DL #100 (a representative DL with geometry)
-    g_dl_trace = (g_state.dl_total_count == 100);
+    // Enable trace for specific DLs (representative DLs with geometry)
+    g_dl_trace = (g_state.dl_total_count == 50 || g_state.dl_total_count == 200 ||
+                  g_state.dl_total_count == 500);
     if (g_dl_trace) g_fb_write_log_count = 0;
 
     if (g_state.dl_total_count <= 5 || (g_state.dl_total_count <= 100 && g_state.dl_total_count % 20 == 0)) {
@@ -1528,27 +1585,31 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
     int tri_before = g_state.tri_total_count;
     int pix_before = g_pixel_write_count;
 
+    // Reset per-DL tracking
+    g_state.dl_sx_min = 9999; g_state.dl_sx_max = -9999;
+    g_state.dl_sy_min = 9999; g_state.dl_sy_max = -9999;
+    g_state.dl_tri_inbounds = 0; g_state.dl_tri_outbounds = 0; g_state.dl_tri_culled = 0;
+    g_state.dl_tri_rasterized = 0; g_state.dl_tri_pixels = 0;
+
     process_dl_recursive(rdram, phys, 0);
 
     int tri_this_dl = g_state.tri_total_count - tri_before;
     int pix_this_dl = g_pixel_write_count - pix_before;
 
-    // Periodic summary every 50 DLs
-    if (g_state.dl_total_count % 50 == 0) {
-        fprintf(stderr, "[F3DDKR] === DL #%d summary: total_tris=%d total_pixels=%d ci=0x%06X "
-                "vp_scale=(%.0f,%.0f) active_mtx=%d ===\n",
-                g_state.dl_total_count, g_state.tri_total_count, g_pixel_write_count,
-                g_state.ci_addr, g_state.vp_scale_x, g_state.vp_scale_y,
-                g_state.active_matrix_index);
+    // Periodic summary every 50 DLs with viewport/scissor info
+    if (g_state.dl_total_count % 50 == 0 || g_dl_trace) {
+        fprintf(stderr, "[F3DDKR] === DL #%d: %d tris (%d in, %d out, %d culled, %d rasterized, %d tri_pix), %d total_pix\n"
+                "         vp_scale=(%.1f,%.1f) vp_trans=(%.1f,%.1f) scissor=(%d,%d)-(%d,%d)\n"
+                "         ci=0x%06X active_mtx=%d screen_range=(%.1f-%.1f, %.1f-%.1f) ===\n",
+                g_state.dl_total_count, tri_this_dl,
+                g_state.dl_tri_inbounds, g_state.dl_tri_outbounds, g_state.dl_tri_culled,
+                g_state.dl_tri_rasterized, g_state.dl_tri_pixels,
+                pix_this_dl,
+                g_state.vp_scale_x, g_state.vp_scale_y,
+                g_state.vp_trans_x, g_state.vp_trans_y,
+                g_state.sc_xl, g_state.sc_yl, g_state.sc_xh, g_state.sc_yh,
+                g_state.ci_addr, g_state.active_matrix_index,
+                g_state.dl_sx_min, g_state.dl_sx_max, g_state.dl_sy_min, g_state.dl_sy_max);
         fflush(stderr);
-    }
-
-    // Log DLs that draw significant content
-    if (tri_this_dl > 0 || pix_this_dl > 100) {
-        if (g_state.dl_total_count > 10) { // skip early DLs (already logged)
-            fprintf(stderr, "[F3DDKR] DL #%d drew %d tris, %d pixels (ci=0x%06X)\n",
-                    g_state.dl_total_count, tri_this_dl, pix_this_dl, g_state.ci_addr);
-            fflush(stderr);
-        }
     }
 }

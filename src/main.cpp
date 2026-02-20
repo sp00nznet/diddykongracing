@@ -134,6 +134,9 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     auto_press(4000, 0x1000);  // Start at 4s (skip Nintendo logo)
     auto_press(8000, 0x1000);  // Start at 8s (skip Rareware logo)
     auto_press(12000, 0x1000); // Start at 12s (advance title screen)
+    auto_press(16000, 0x8000); // A at 16s (select menu option)
+    auto_press(20000, 0x8000); // A at 20s (continue advancing)
+    auto_press(24000, 0x8000); // A at 24s (continue advancing)
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 
