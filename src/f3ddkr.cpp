@@ -140,6 +140,193 @@ static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_
 }
 
 // ============================================================
+// N64 Color Combiner
+// ============================================================
+// Formula per cycle: color = (A - B) * C + D
+//                    alpha = (Aa - Ab) * Ac + Ad
+
+struct CombineInput {
+    uint8_t r, g, b, a;
+};
+
+// Extract combine mode fields from the 64-bit combine_mode value
+struct CombineMode {
+    // Cycle 0
+    int a0, b0, c0, d0;     // RGB inputs
+    int Aa0, Ab0, Ac0, Ad0; // Alpha inputs
+    // Cycle 1
+    int a1, b1, c1, d1;
+    int Aa1, Ab1, Ac1, Ad1;
+};
+
+static CombineMode decode_combine_mode() {
+    CombineMode cm;
+    uint32_t hi = (uint32_t)(g_state.combine_mode >> 32);
+    uint32_t lo = (uint32_t)(g_state.combine_mode & 0xFFFFFFFF);
+
+    // Upper 32 bits (data in bits 23:0 after opcode byte)
+    cm.a0  = (hi >> 20) & 0xF;
+    cm.c0  = (hi >> 15) & 0x1F;
+    cm.Aa0 = (hi >> 12) & 0x7;
+    cm.Ac0 = (hi >> 9) & 0x7;
+    cm.a1  = (hi >> 5) & 0xF;
+    cm.c1  = hi & 0x1F;
+
+    // Lower 32 bits
+    cm.b0  = (lo >> 28) & 0xF;
+    cm.b1  = (lo >> 24) & 0xF;
+    cm.Aa1 = (lo >> 21) & 0x7;
+    cm.Ac1 = (lo >> 18) & 0x7;
+    cm.d0  = (lo >> 15) & 0x7;
+    cm.Ab0 = (lo >> 12) & 0x7;
+    cm.Ad0 = (lo >> 9) & 0x7;
+    cm.d1  = (lo >> 6) & 0x7;
+    cm.Ab1 = (lo >> 3) & 0x7;
+    cm.Ad1 = lo & 0x7;
+
+    return cm;
+}
+
+// Get RGB color for a combine input selector (a/b inputs, 4-bit)
+// 0=COMBINED, 1=TEXEL0, 2=TEXEL1, 3=PRIMITIVE, 4=SHADE, 5=ENVIRONMENT, 6=1, 7=NOISE, 8+=0
+static inline void get_cc_rgb_ab(int sel, const CombineInput& tex, const CombineInput& shade,
+                                  const CombineInput& combined, uint8_t& r, uint8_t& g, uint8_t& b) {
+    switch (sel) {
+        case 0: r = combined.r; g = combined.g; b = combined.b; break;
+        case 1: r = tex.r; g = tex.g; b = tex.b; break;
+        case 2: r = tex.r; g = tex.g; b = tex.b; break; // TEXEL1 = TEXEL0 (single texture)
+        case 3: r = (g_state.prim_color >> 24) & 0xFF; g = (g_state.prim_color >> 16) & 0xFF; b = (g_state.prim_color >> 8) & 0xFF; break;
+        case 4: r = shade.r; g = shade.g; b = shade.b; break;
+        case 5: r = (g_state.env_color >> 24) & 0xFF; g = (g_state.env_color >> 16) & 0xFF; b = (g_state.env_color >> 8) & 0xFF; break;
+        case 6: r = g = b = 255; break; // 1.0
+        default: r = g = b = 0; break;  // NOISE or invalid = 0
+    }
+}
+
+// Get RGB multiplier for combine input (c input, 5-bit)
+// 0=COMBINED, 1=TEXEL0, 2=TEXEL1, 3=PRIMITIVE, 4=SHADE, 5=ENVIRONMENT,
+// 6=SCALE(?), 7=COMBINED_ALPHA, 8=TEXEL0_ALPHA, 9=TEXEL1_ALPHA,
+// 10=PRIMITIVE_ALPHA, 11=SHADE_ALPHA, 12=ENV_ALPHA, 13=LOD_FRACTION,
+// 14=PRIM_LOD_FRAC, 15=K5, 16+=0
+static inline void get_cc_rgb_c(int sel, const CombineInput& tex, const CombineInput& shade,
+                                 const CombineInput& combined, uint8_t& r, uint8_t& g, uint8_t& b) {
+    switch (sel) {
+        case 0: r = combined.r; g = combined.g; b = combined.b; break;
+        case 1: r = tex.r; g = tex.g; b = tex.b; break;
+        case 2: r = tex.r; g = tex.g; b = tex.b; break;
+        case 3: r = (g_state.prim_color >> 24) & 0xFF; g = (g_state.prim_color >> 16) & 0xFF; b = (g_state.prim_color >> 8) & 0xFF; break;
+        case 4: r = shade.r; g = shade.g; b = shade.b; break;
+        case 5: r = (g_state.env_color >> 24) & 0xFF; g = (g_state.env_color >> 16) & 0xFF; b = (g_state.env_color >> 8) & 0xFF; break;
+        case 7: r = g = b = combined.a; break;    // COMBINED_ALPHA
+        case 8: r = g = b = tex.a; break;          // TEXEL0_ALPHA
+        case 9: r = g = b = tex.a; break;          // TEXEL1_ALPHA
+        case 10: r = g = b = g_state.prim_color & 0xFF; break; // PRIMITIVE_ALPHA
+        case 11: r = g = b = shade.a; break;       // SHADE_ALPHA
+        case 12: r = g = b = g_state.env_color & 0xFF; break;  // ENV_ALPHA
+        default: r = g = b = 0; break;
+    }
+}
+
+// Get RGB for d (add) input, 3-bit
+// 0=COMBINED, 1=TEXEL0, 2=TEXEL1, 3=PRIMITIVE, 4=SHADE, 5=ENVIRONMENT, 6=1, 7=0
+static inline void get_cc_rgb_d(int sel, const CombineInput& tex, const CombineInput& shade,
+                                 const CombineInput& combined, uint8_t& r, uint8_t& g, uint8_t& b) {
+    switch (sel) {
+        case 0: r = combined.r; g = combined.g; b = combined.b; break;
+        case 1: r = tex.r; g = tex.g; b = tex.b; break;
+        case 2: r = tex.r; g = tex.g; b = tex.b; break;
+        case 3: r = (g_state.prim_color >> 24) & 0xFF; g = (g_state.prim_color >> 16) & 0xFF; b = (g_state.prim_color >> 8) & 0xFF; break;
+        case 4: r = shade.r; g = shade.g; b = shade.b; break;
+        case 5: r = (g_state.env_color >> 24) & 0xFF; g = (g_state.env_color >> 16) & 0xFF; b = (g_state.env_color >> 8) & 0xFF; break;
+        case 6: r = g = b = 255; break;
+        default: r = g = b = 0; break;
+    }
+}
+
+// Get alpha for combine input (a/b/d), 3-bit
+// 0=COMBINED, 1=TEXEL0, 2=TEXEL1, 3=PRIMITIVE, 4=SHADE, 5=ENVIRONMENT, 6=1, 7=0
+static inline uint8_t get_cc_alpha_abd(int sel, const CombineInput& tex, const CombineInput& shade,
+                                        const CombineInput& combined) {
+    switch (sel) {
+        case 0: return combined.a;
+        case 1: return tex.a;
+        case 2: return tex.a;
+        case 3: return g_state.prim_color & 0xFF;
+        case 4: return shade.a;
+        case 5: return g_state.env_color & 0xFF;
+        case 6: return 255;
+        default: return 0;
+    }
+}
+
+// Get alpha multiplier (c input), 3-bit
+// 0=LOD_FRACTION, 1=TEXEL0, 2=TEXEL1, 3=PRIMITIVE, 4=SHADE, 5=ENVIRONMENT, 6=PRIM_LOD_FRAC, 7=0
+static inline uint8_t get_cc_alpha_c(int sel, const CombineInput& tex, const CombineInput& shade,
+                                      const CombineInput& combined) {
+    switch (sel) {
+        case 0: return 0; // LOD_FRACTION (unimplemented, treat as 0)
+        case 1: return tex.a;
+        case 2: return tex.a;
+        case 3: return g_state.prim_color & 0xFF;
+        case 4: return shade.a;
+        case 5: return g_state.env_color & 0xFF;
+        case 6: return 0; // PRIM_LOD_FRAC (unimplemented)
+        default: return 0;
+    }
+}
+
+// Execute one cycle of the color combiner
+static CombineInput combine_cycle(int a_sel, int b_sel, int c_sel, int d_sel,
+                                   int Aa_sel, int Ab_sel, int Ac_sel, int Ad_sel,
+                                   const CombineInput& tex, const CombineInput& shade,
+                                   const CombineInput& combined) {
+    uint8_t ar, ag, ab, br, bg, bb, cr, cg, cb, dr, dg, db;
+    get_cc_rgb_ab(a_sel, tex, shade, combined, ar, ag, ab);
+    get_cc_rgb_ab(b_sel, tex, shade, combined, br, bg, bb);
+    get_cc_rgb_c(c_sel, tex, shade, combined, cr, cg, cb);
+    get_cc_rgb_d(d_sel, tex, shade, combined, dr, dg, db);
+
+    uint8_t Aa = get_cc_alpha_abd(Aa_sel, tex, shade, combined);
+    uint8_t Ab = get_cc_alpha_abd(Ab_sel, tex, shade, combined);
+    uint8_t Ac = get_cc_alpha_c(Ac_sel, tex, shade, combined);
+    uint8_t Ad = get_cc_alpha_abd(Ad_sel, tex, shade, combined);
+
+    CombineInput result;
+    // (A - B) * C + D, all in [0,255] range
+    // Use signed math: A-B can be negative, multiply by C/255, add D, clamp to [0,255]
+    result.r = (uint8_t)std::clamp(((int)ar - (int)br) * (int)cr / 255 + (int)dr, 0, 255);
+    result.g = (uint8_t)std::clamp(((int)ag - (int)bg) * (int)cg / 255 + (int)dg, 0, 255);
+    result.b = (uint8_t)std::clamp(((int)ab - (int)bb) * (int)cb / 255 + (int)db, 0, 255);
+    result.a = (uint8_t)std::clamp(((int)Aa - (int)Ab) * (int)Ac / 255 + (int)Ad, 0, 255);
+
+    return result;
+}
+
+// Run the full color combiner (1-cycle or 2-cycle)
+static CombineInput run_color_combiner(const CombineInput& tex, const CombineInput& shade) {
+    CombineMode cm = decode_combine_mode();
+    uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
+
+    CombineInput combined = {0, 0, 0, 0};
+
+    // Cycle 0
+    combined = combine_cycle(cm.a0, cm.b0, cm.c0, cm.d0,
+                              cm.Aa0, cm.Ab0, cm.Ac0, cm.Ad0,
+                              tex, shade, combined);
+
+    // Cycle 1 (only for 2-cycle mode)
+    if (cycle_type == G_CYC_2CYCLE) {
+        combined = combine_cycle(cm.a1, cm.b1, cm.c1, cm.d1,
+                                  cm.Aa1, cm.Ab1, cm.Ac1, cm.Ad1,
+                                  tex, shade, combined);
+    }
+
+    return combined;
+}
+
+static int g_cc_log_count = 0;
+
+// ============================================================
 // Z-buffer helpers
 // ============================================================
 static inline uint16_t read_zbuf(int x, int y) {
@@ -898,19 +1085,18 @@ static void draw_scanline(int y, float x_left, float x_right,
         pb = (uint8_t)std::clamp(cur_b, 0.0f, 255.0f);
         pa = (uint8_t)std::clamp(cur_a, 0.0f, 255.0f);
 
+        CombineInput shade_in = { pr, pg, pb, pa };
+        CombineInput tex_in = { 0, 0, 0, 255 };
+
         if (textured) {
-            uint8_t tr, tg, tb, ta;
             int si = (int)floorf(cur_u);
             int ti = (int)floorf(cur_v);
-            sample_texel(tile_idx, si, ti, tr, tg, tb, ta);
-            // Simple modulate: tex * shade
-            pr = (uint8_t)((pr * tr) >> 8);
-            pg = (uint8_t)((pg * tg) >> 8);
-            pb = (uint8_t)((pb * tb) >> 8);
-            pa = (uint8_t)((pa * ta) >> 8);
+            sample_texel(tile_idx, si, ti, tex_in.r, tex_in.g, tex_in.b, tex_in.a);
         }
 
-        write_fb_pixel(x, y, pr, pg, pb, pa);
+        // Run color combiner
+        CombineInput out = run_color_combiner(tex_in, shade_in);
+        write_fb_pixel(x, y, out.r, out.g, out.b, out.a);
 
         z += dz;
         cur_r += dr; cur_g += dg; cur_b += db; cur_a += da;
@@ -1234,9 +1420,16 @@ static void cmd_texrect(uint32_t w0, uint32_t w1, uint32_t st_word, uint32_t dsd
                 fflush(stderr);
             }
 
-            // Write texel directly - texture contains actual RGBA colors
-            // TODO: implement proper N64 color combiner for accurate rendering
-            write_fb_pixel(x, y, tr, tg, tb, ta);
+            if (copy_mode) {
+                // In copy mode, write texel directly (no combiner)
+                write_fb_pixel(x, y, tr, tg, tb, ta);
+            } else {
+                // Run color combiner
+                CombineInput tex_in = { tr, tg, tb, ta };
+                CombineInput shade_in = { 255, 255, 255, 255 }; // TEXRECT has no shade, use white
+                CombineInput out = run_color_combiner(tex_in, shade_in);
+                write_fb_pixel(x, y, out.r, out.g, out.b, out.a);
+            }
             texrect_pix++;
             cur_s += fdsdx;
         }
