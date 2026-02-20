@@ -67,9 +67,42 @@
 #define F3DDKR_Z_CMP        0x10
 #define F3DDKR_Z_UPD        0x20
 #define F3DDKR_IM_RD        0x40
-#define F3DDKR_CVG_X_ALPHA  0x2000
-#define F3DDKR_ALPHA_CVG_SEL 0x4000
-#define F3DDKR_FORCE_BL     0x4000  // in cycle bits
+#define F3DDKR_CVG_X_ALPHA   0x1000
+#define F3DDKR_ALPHA_CVG_SEL 0x2000
+#define F3DDKR_FORCE_BL      0x4000
+
+// --- Blender mux bit positions in other_mode_l ---
+// Cycle 0 (c1): GBL_c1(m1a, m1b, m2a, m2b)
+#define BL_M1A_0_SHIFT  30   // P color select (cycle 0)
+#define BL_M1B_0_SHIFT  26   // A factor select (cycle 0)
+#define BL_M2A_0_SHIFT  22   // M color select (cycle 0)
+#define BL_M2B_0_SHIFT  18   // B factor select (cycle 0)
+// Cycle 1 (c2): GBL_c2(m1a, m1b, m2a, m2b)
+#define BL_M1A_1_SHIFT  28   // P color select (cycle 1)
+#define BL_M1B_1_SHIFT  24   // A factor select (cycle 1)
+#define BL_M2A_1_SHIFT  20   // M color select (cycle 1)
+#define BL_M2B_1_SHIFT  16   // B factor select (cycle 1)
+
+// Blender P/M color selections (m1a/m2a, 2-bit)
+#define G_BL_CLR_IN   0   // CC output
+#define G_BL_CLR_MEM  1   // Framebuffer
+#define G_BL_CLR_BL   2   // Blend register color
+#define G_BL_CLR_FOG  3   // Fog color
+
+// Blender A factor selections (m1b, 2-bit)
+#define G_BL_A_IN     0   // CC alpha
+#define G_BL_A_FOG    1   // Fog alpha
+#define G_BL_A_SHADE  2   // Shade alpha (vertex)
+#define G_BL_A_ZERO   3   // 0
+
+// Blender B factor selections (m2b, 2-bit)
+#define G_BL_1MA      0   // 1 - A
+#define G_BL_A_MEM    1   // Memory (framebuffer) alpha
+#define G_BL_1        2   // 1.0 (255)
+#define G_BL_0        3   // 0
+
+// --- Geometry mode flags ---
+#define G_FOG         0x00010000
 
 // --- Texture format/size ---
 #define FMT_RGBA    0
@@ -168,8 +201,15 @@ struct F3DDKRState {
     uint32_t other_mode_h;
     uint32_t other_mode_l;
 
+    // Geometry mode
+    uint32_t geometry_mode;
+
     // Combine mode
     uint64_t combine_mode;
+
+    // Fog parameters (from G_MOVEWORD fog)
+    int16_t fog_multiplier;
+    int16_t fog_offset;
 
     // Matrices (3 slots: 0=viewport/projection, 1=model, 2=billboard)
     float matrices[3][4][4];
@@ -212,10 +252,6 @@ struct F3DDKRState {
     int tri_total_count;    // total triangles submitted
     int cmd_counts[256];    // per-opcode count for logging
 
-    // Per-DL triangle tracking
-    float dl_sx_min, dl_sx_max, dl_sy_min, dl_sy_max;
-    int dl_tri_inbounds, dl_tri_outbounds, dl_tri_culled;
-    int dl_tri_rasterized, dl_tri_pixels;
 };
 
 // ============================================================

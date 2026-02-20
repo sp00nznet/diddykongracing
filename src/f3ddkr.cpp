@@ -10,10 +10,8 @@
 // ============================================================
 static F3DDKRState g_state;
 static bool g_initialized = false;
-static bool g_dl_trace = false;
-
-// Log first N occurrences of each opcode
-static constexpr int LOG_FIRST_N = 3;
+// Log first N occurrences of each opcode (then go silent)
+static constexpr int LOG_FIRST_N = 1;
 
 static void log_cmd(uint8_t op, const char* name, uint32_t w0, uint32_t w1) {
     if (g_state.cmd_counts[op] < LOG_FIRST_N) {
@@ -92,6 +90,30 @@ static inline void write_pixel_32(uint8_t* rdram, uint32_t fb_addr, uint32_t fb_
     rdram_write_u32(rdram, phys, color32);
 }
 
+// Read existing framebuffer pixel (for blender)
+static inline void read_fb_pixel(int x, int y, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) {
+    if (g_state.ci_addr == 0) { r = g = b = a = 0; return; }
+    if (g_state.ci_size == SIZ_16b) {
+        uint32_t phys = g_state.ci_addr + ((uint32_t)y * g_state.ci_width + (uint32_t)x) * 2;
+        if (phys + 1 >= 0x800000) { r = g = b = a = 0; return; }
+        uint16_t pixel = rdram_read_u16(g_state.rdram, phys);
+        r = ((pixel >> 11) & 0x1F) << 3;
+        g = ((pixel >> 6) & 0x1F) << 3;
+        b = ((pixel >> 1) & 0x1F) << 3;
+        a = (pixel & 1) ? 0xFF : 0;
+    } else if (g_state.ci_size == SIZ_32b) {
+        uint32_t phys = g_state.ci_addr + ((uint32_t)y * g_state.ci_width + (uint32_t)x) * 4;
+        if (phys + 3 >= 0x800000) { r = g = b = a = 0; return; }
+        uint32_t pixel = rdram_read_u32(g_state.rdram, phys);
+        r = (pixel >> 24) & 0xFF;
+        g = (pixel >> 16) & 0xFF;
+        b = (pixel >> 8) & 0xFF;
+        a = pixel & 0xFF;
+    } else {
+        r = g = b = a = 0;
+    }
+}
+
 static inline uint16_t rgba8888_to_rgba5551(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return ((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a ? 1 : 0);
 }
@@ -103,26 +125,101 @@ static inline void rgba5551_to_rgba8888(uint16_t c, uint8_t& r, uint8_t& g, uint
     a = (c & 1) ? 0xFF : 0;
 }
 
-// Write a pixel to the framebuffer, using the current color image settings
+// Write a pixel to the framebuffer with RDP blender
+// shade_a: raw vertex alpha (pre-combiner), used for A_SHADE blender input
 static int g_pixel_write_count = 0;
 
-static int g_fb_write_log_count = 0;
-
-static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a,
+                            uint8_t shade_a = 255) {
     if (g_state.ci_addr == 0) return;
     if (x < g_state.sc_xl || x >= g_state.sc_xh || y < g_state.sc_yl || y >= g_state.sc_yh) return;
 
     // Alpha test: skip fully transparent pixels
     if (a == 0) return;
 
-    // Log first few non-black pixel writes for debugging
-    if (g_dl_trace && g_fb_write_log_count < 10 && (r > 4 || g > 4 || b > 4)) {
-        fprintf(stderr, "[TRACE] PIXEL @(%d,%d) rgba=(%d,%d,%d,%d) ci=0x%06X\n",
-                x, y, r, g, b, a, g_state.ci_addr);
-        fflush(stderr);
-        g_fb_write_log_count++;
+    // RDP Blender: applies when FORCE_BL is set in 1-cycle or 2-cycle mode
+    uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
+    bool do_blend = (cycle_type == G_CYC_1CYCLE || cycle_type == G_CYC_2CYCLE) &&
+                    (g_state.other_mode_l & F3DDKR_FORCE_BL);
+
+    if (do_blend) {
+        // Read existing framebuffer pixel
+        uint8_t mem_r, mem_g, mem_b, mem_a;
+        read_fb_pixel(x, y, mem_r, mem_g, mem_b, mem_a);
+
+        // Get blender mux settings
+        // In 1-cycle mode: use cycle 0 (c1) settings
+        // In 2-cycle mode: use cycle 1 (c2) settings for final output
+        int p_sel, a_sel, m_sel, b_sel;
+        if (cycle_type == G_CYC_2CYCLE) {
+            p_sel = (g_state.other_mode_l >> BL_M1A_1_SHIFT) & 3;
+            a_sel = (g_state.other_mode_l >> BL_M1B_1_SHIFT) & 3;
+            m_sel = (g_state.other_mode_l >> BL_M2A_1_SHIFT) & 3;
+            b_sel = (g_state.other_mode_l >> BL_M2B_1_SHIFT) & 3;
+        } else {
+            p_sel = (g_state.other_mode_l >> BL_M1A_0_SHIFT) & 3;
+            a_sel = (g_state.other_mode_l >> BL_M1B_0_SHIFT) & 3;
+            m_sel = (g_state.other_mode_l >> BL_M2A_0_SHIFT) & 3;
+            b_sel = (g_state.other_mode_l >> BL_M2B_0_SHIFT) & 3;
+        }
+
+        // Select P color (pixel source)
+        int pr, pg, pb;
+        switch (p_sel) {
+            case G_BL_CLR_IN:  pr = r; pg = g; pb = b; break;
+            case G_BL_CLR_MEM: pr = mem_r; pg = mem_g; pb = mem_b; break;
+            case G_BL_CLR_BL:  pr = (g_state.blend_color >> 24) & 0xFF;
+                               pg = (g_state.blend_color >> 16) & 0xFF;
+                               pb = (g_state.blend_color >> 8) & 0xFF; break;
+            case G_BL_CLR_FOG: pr = (g_state.fog_color >> 24) & 0xFF;
+                               pg = (g_state.fog_color >> 16) & 0xFF;
+                               pb = (g_state.fog_color >> 8) & 0xFF; break;
+            default: pr = pg = pb = 0; break;
+        }
+
+        // Select A factor
+        int af;
+        switch (a_sel) {
+            case G_BL_A_IN:    af = a; break;
+            case G_BL_A_FOG:   af = (g_state.fog_color & 0xFF); break;
+            case G_BL_A_SHADE: af = shade_a; break;
+            default:           af = 0; break;
+        }
+
+        // Select M color (memory/blend source)
+        int mr, mg, mb;
+        switch (m_sel) {
+            case G_BL_CLR_IN:  mr = r; mg = g; mb = b; break;
+            case G_BL_CLR_MEM: mr = mem_r; mg = mem_g; mb = mem_b; break;
+            case G_BL_CLR_BL:  mr = (g_state.blend_color >> 24) & 0xFF;
+                               mg = (g_state.blend_color >> 16) & 0xFF;
+                               mb = (g_state.blend_color >> 8) & 0xFF; break;
+            case G_BL_CLR_FOG: mr = (g_state.fog_color >> 24) & 0xFF;
+                               mg = (g_state.fog_color >> 16) & 0xFF;
+                               mb = (g_state.fog_color >> 8) & 0xFF; break;
+            default: mr = mg = mb = 0; break;
+        }
+
+        // Select B factor
+        int bf;
+        switch (b_sel) {
+            case G_BL_1MA:   bf = 255 - af; break;
+            case G_BL_A_MEM: bf = mem_a; break;
+            case G_BL_1:     bf = 255; break;
+            default:         bf = 0; break;
+        }
+
+        // Blender formula: out = (P * A + M * B) / (A + B)
+        int denom = af + bf;
+        if (denom > 0) {
+            r = (uint8_t)std::clamp((pr * af + mr * bf) / denom, 0, 255);
+            g = (uint8_t)std::clamp((pg * af + mg * bf) / denom, 0, 255);
+            b = (uint8_t)std::clamp((pb * af + mb * bf) / denom, 0, 255);
+        }
+        a = 255; // blended pixel has full coverage
     }
 
+    // Write final pixel to framebuffer
     if (g_state.ci_size == SIZ_16b) {
         uint16_t pixel = rgba8888_to_rgba5551(r, g, b, a);
         write_pixel_16(g_state.rdram, g_state.ci_addr, g_state.ci_width, x, y, pixel);
@@ -132,11 +229,6 @@ static void write_fb_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_
     }
 
     g_pixel_write_count++;
-    if (g_pixel_write_count == 1 || g_pixel_write_count == 100 || g_pixel_write_count == 10000) {
-        fprintf(stderr, "[F3DDKR] Pixel write #%d: (%d,%d) RGBA=(%d,%d,%d,%d) ci=0x%06X\n",
-                g_pixel_write_count, x, y, r, g, b, a, g_state.ci_addr);
-        fflush(stderr);
-    }
 }
 
 // ============================================================
@@ -324,8 +416,6 @@ static CombineInput run_color_combiner(const CombineInput& tex, const CombineInp
     return combined;
 }
 
-static int g_cc_log_count = 0;
-
 // ============================================================
 // Z-buffer helpers
 // ============================================================
@@ -402,14 +492,6 @@ static void cmd_fill_rect(uint32_t w0, uint32_t w1) {
 // ============================================================
 // Phase 2: Matrix loading
 // ============================================================
-static int g_mtx_log_count = 0;
-
-// Force a test matrix for debugging: simple scale+translate that maps
-// vertex range (-400..400) to screen (0..320, 0..237)
-// With vp_scale=(160,120), vp_trans=(160,120):
-//   sx = cx/cw * 160 + 160 => for cx=x, cw=640: sx = x/4 + 160
-//   sy = cy/cw * 120 + 120 => for cy=y, cw=640: sy = 3y/16 + 120
-static constexpr bool FORCE_TEST_MATRIX = false;
 
 static void load_matrix(uint32_t rdram_addr, int index) {
     if (index < 0 || index > 2) return;
@@ -426,101 +508,6 @@ static void load_matrix(uint32_t rdram_addr, int index) {
             int32_t fixed = ((int32_t)int_part << 16) | frac_part;
             g_state.matrices[index][i][j] = (float)fixed / 65536.0f;
         }
-    }
-
-    // Override with test matrix if enabled (only for 3D matrices, not the ortho overlay)
-    if (FORCE_TEST_MATRIX && index <= 1) {
-        // Check if this looks like the orthographic overlay matrix (m[0][0]==1, m[3][3]>=100)
-        bool is_ortho = (fabsf(g_state.matrices[index][0][0] - 1.0f) < 0.1f &&
-                        g_state.matrices[index][3][3] > 50.0f);
-        if (!is_ortho) {
-            // Replace with simple perspective: cw = -z (perspective divide)
-            // With vp scale (160,120) and translate (160,120):
-            //   sx = cx/cw * 160 + 160, sy = cy/cw * 120 + 120
-            // Using m[0][0]=0.5, m[1][1]=0.6, m[2][3]=-1, m[3][2]=-20
-            memset(g_state.matrices[index], 0, sizeof(g_state.matrices[index]));
-            g_state.matrices[index][0][0] = 0.5f;    // x scale
-            g_state.matrices[index][1][1] = 0.6f;    // y scale (wider for aspect)
-            g_state.matrices[index][2][2] = -1.002f;  // near/far factor
-            g_state.matrices[index][2][3] = -1.0f;    // perspective flag
-            g_state.matrices[index][3][2] = -20.0f;   // near*far factor
-            // cw = -z, so for z=-200, cw=200
-            // cx = 0.5*x, sx = (0.5*x)/(-z) * 160 + 160
-            // For vertex (161, 218, -153): cx=80.5, cw=153, sx=80.5/153*160+160=244
-            // For vertex (0, 249, 0): cw=0, degenerate - OK
-        }
-    }
-
-    // Check if matrix is non-degenerate (has non-zero diagonal)
-    float diag_sum = fabsf(g_state.matrices[index][0][0]) + fabsf(g_state.matrices[index][1][1]) +
-                     fabsf(g_state.matrices[index][2][2]) + fabsf(g_state.matrices[index][3][3]);
-    static int total_mtx_loads = 0;
-    static int nonzero_count = 0;
-    static int nonzero_logged = 0;
-    total_mtx_loads++;
-    if (diag_sum > 0.1f) {
-        nonzero_count++;
-        if (nonzero_logged < 5) {
-            fprintf(stderr, "[F3DDKR] NON-DEGENERATE MTX[%d] (#%d) at 0x%06X DL#%d (diag=%.2f):\n",
-                    index, nonzero_logged + 1, phys, g_state.dl_total_count, diag_sum);
-            for (int i = 0; i < 4; i++) {
-                fprintf(stderr, "  [%12.4f %12.4f %12.4f %12.4f]\n",
-                        g_state.matrices[index][i][0], g_state.matrices[index][i][1],
-                        g_state.matrices[index][i][2], g_state.matrices[index][i][3]);
-            }
-            fflush(stderr);
-            nonzero_logged++;
-        }
-    }
-    // Log summary of matrix loads periodically (reduce spam)
-    if (total_mtx_loads == 1000 || total_mtx_loads == 10000 || total_mtx_loads % 100000 == 0) {
-        fprintf(stderr, "[F3DDKR] MTX stats: %d loads, %d non-degenerate (DL#%d)\n",
-                total_mtx_loads, nonzero_count, g_state.dl_total_count);
-        fflush(stderr);
-    }
-    // Dump raw bytes for a later matrix (DL 50-55) to check if data is still zero
-    if (g_state.dl_total_count >= 50 && g_state.dl_total_count <= 55 && total_mtx_loads > 10) {
-        static int late_dump_count = 0;
-        if (late_dump_count < 3) {
-            fprintf(stderr, "[F3DDKR] LATE MTX[%d] at DL#%d phys=0x%06X diag=%.4f:\n  INT: ",
-                    index, g_state.dl_total_count, phys, diag_sum);
-            for (int w = 0; w < 8; w++)
-                fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + w * 4));
-            fprintf(stderr, "\n  FRC: ");
-            for (int w = 0; w < 8; w++)
-                fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + 32 + w * 4));
-            fprintf(stderr, "\n  Parsed: [%.4f %.4f %.4f %.4f] [%.4f %.4f %.4f %.4f] ...\n",
-                    g_state.matrices[index][0][0], g_state.matrices[index][0][1],
-                    g_state.matrices[index][0][2], g_state.matrices[index][0][3],
-                    g_state.matrices[index][1][0], g_state.matrices[index][1][1],
-                    g_state.matrices[index][1][2], g_state.matrices[index][1][3]);
-            fflush(stderr);
-            late_dump_count++;
-        }
-    }
-
-    // Log first few matrices with full detail + raw bytes
-    if (g_mtx_log_count < 3) {
-        fprintf(stderr, "[F3DDKR] MTX[%d] from 0x%06X diag=(%.2f,%.2f,%.2f,%.2f):\n", index, phys,
-                g_state.matrices[index][0][0], g_state.matrices[index][1][1],
-                g_state.matrices[index][2][2], g_state.matrices[index][3][3]);
-        for (int i = 0; i < 4; i++) {
-            fprintf(stderr, "  [%10.4f %10.4f %10.4f %10.4f]\n",
-                    g_state.matrices[index][i][0], g_state.matrices[index][i][1],
-                    g_state.matrices[index][i][2], g_state.matrices[index][i][3]);
-        }
-        // Dump raw 64 bytes (as 32-bit words) for debugging
-        fprintf(stderr, "[F3DDKR] MTX raw 64 bytes at phys=0x%06X:\n  INT: ", phys);
-        for (int w = 0; w < 8; w++) {
-            fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + w * 4));
-        }
-        fprintf(stderr, "\n  FRC: ");
-        for (int w = 0; w < 8; w++) {
-            fprintf(stderr, "%08X ", rdram_read_u32(g_state.rdram, phys + 32 + w * 4));
-        }
-        fprintf(stderr, "\n");
-        fflush(stderr);
-        g_mtx_log_count++;
     }
 }
 
@@ -539,16 +526,6 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
     }
 
     load_matrix(addr, index);
-
-    if (g_dl_trace) {
-        fprintf(stderr, "[TRACE] G_MTX slot=%d addr=0x%06X:\n", index, addr_to_phys(addr));
-        for (int r = 0; r < 4; r++) {
-            fprintf(stderr, "  [%10.4f %10.4f %10.4f %10.4f]\n",
-                    g_state.matrices[index][r][0], g_state.matrices[index][r][1],
-                    g_state.matrices[index][r][2], g_state.matrices[index][r][3]);
-        }
-        fflush(stderr);
-    }
 }
 
 // ============================================================
@@ -629,13 +606,6 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
             tv.sy = 0;
         }
 
-        // DL trace: log first few vertices with transform results + color + address
-        if (g_dl_trace && i < 5) {
-            fprintf(stderr, "[TRACE] VTX[%d] @0x%06X: raw=(%d,%d,%d) rgba=(%d,%d,%d,%d) mtx=%d clip=(%.2f,%.2f,%.2f,%.2f) screen=(%.1f,%.1f)\n",
-                    start_idx + i, addr + i * 10, vx, vy, vz, vr, vg, vb, va, g_state.active_matrix_index,
-                    tv.cx, tv.cy, tv.cz, tv.cw, tv.sx, tv.sy);
-            fflush(stderr);
-        }
         loaded++;
     }
     g_state.num_vertices = start_idx + loaded;
@@ -710,14 +680,6 @@ static void cmd_loadblock(uint32_t w0, uint32_t w1) {
     // For RGBA32 textures, LOADBLOCK uses SIZ_16b on the tile with 2x texel count,
     // but the texture image (ti_size) tells us the true format
     bool is_rgba32 = (g_state.ti_size == SIZ_32b);
-
-    static int lb_log = 0;
-    if (lb_log < 5) {
-        fprintf(stderr, "[F3DDKR] LOADBLOCK: tile=%d t.size=%d ti_size=%d tmem=0x%03X num_texels=%d rgba32=%d\n",
-                tile_idx, t.size, g_state.ti_size, t.tmem_addr, num_texels, is_rgba32);
-        fflush(stderr);
-        lb_log++;
-    }
 
     if (is_rgba32) {
         // RGBA32: interleave into two TMEM banks
@@ -1094,9 +1056,9 @@ static void draw_scanline(int y, float x_left, float x_right,
             sample_texel(tile_idx, si, ti, tex_in.r, tex_in.g, tex_in.b, tex_in.a);
         }
 
-        // Run color combiner
+        // Run color combiner, then blender (shade_a = pre-combiner vertex alpha)
         CombineInput out = run_color_combiner(tex_in, shade_in);
-        write_fb_pixel(x, y, out.r, out.g, out.b, out.a);
+        write_fb_pixel(x, y, out.r, out.g, out.b, out.a, pa);
 
         z += dz;
         cur_r += dr; cur_g += dg; cur_b += db; cur_a += da;
@@ -1231,62 +1193,14 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
         const TransformedVertex& v2 = g_state.vertex_buffer[vi2];
 
         g_state.tri_total_count++;
-        // Log first few triangles + first few from DL #11+ (when matrix is non-degenerate)
-        bool is_nondegen = (v0.sx != v1.sx || v0.sy != v1.sy || v1.sx != v2.sx || v1.sy != v2.sy);
-        static int nondegen_logged = 0;
-        static int late_tri_logged = 0;
-        bool is_late_tri = (g_state.dl_total_count >= 11 && late_tri_logged < 8);
-        if (g_state.tri_total_count <= 5 || (is_nondegen && nondegen_logged < 10) || is_late_tri) {
-            fprintf(stderr, "[F3DDKR] TRI#%d DL#%d: vi=%d,%d,%d flags=0x%02X tex=%d "
-                    "screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) cw=%.1f,%.1f,%.1f\n",
-                    g_state.tri_total_count, g_state.dl_total_count, vi0, vi1, vi2, flags, tex_enabled,
-                    v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy,
-                    v0.cw, v1.cw, v2.cw);
-            fflush(stderr);
-            if (is_nondegen) nondegen_logged++;
-            if (is_late_tri) late_tri_logged++;
-        }
-
-        // Track screen coordinate ranges for per-DL stats
-        {
-            float sxmin = std::min({v0.sx, v1.sx, v2.sx});
-            float sxmax = std::max({v0.sx, v1.sx, v2.sx});
-            float symin = std::min({v0.sy, v1.sy, v2.sy});
-            float symax = std::max({v0.sy, v1.sy, v2.sy});
-            if (sxmin < g_state.dl_sx_min) g_state.dl_sx_min = sxmin;
-            if (sxmax > g_state.dl_sx_max) g_state.dl_sx_max = sxmax;
-            if (symin < g_state.dl_sy_min) g_state.dl_sy_min = symin;
-            if (symax > g_state.dl_sy_max) g_state.dl_sy_max = symax;
-            bool inbounds = (sxmax >= g_state.sc_xl && sxmin < g_state.sc_xh &&
-                            symax >= g_state.sc_yl && symin < g_state.sc_yh);
-            if (inbounds) g_state.dl_tri_inbounds++;
-            else g_state.dl_tri_outbounds++;
-        }
 
         // Skip if any vertex is behind camera (w <= 0)
-        if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) {
-            g_state.dl_tri_culled++;
-            continue;
-        }
+        if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
 
         // Backface culling using screen-space cross product
         float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
-        // DEBUG: Track backface vs behind-camera culling separately
-        static int bf_cull_count = 0;
         if (!(flags & TRI_BACKFACE_DRAW)) {
-            if (cross <= 0.0f) {
-                g_state.dl_tri_culled++;
-                bf_cull_count++;
-                // Log first few backface culls with details
-                if (bf_cull_count <= 5) {
-                    fprintf(stderr, "[F3DDKR] BF_CULL#%d DL#%d: flags=0x%02X cross=%.1f "
-                            "screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f)\n",
-                            bf_cull_count, g_state.dl_total_count, flags, cross,
-                            v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy);
-                    fflush(stderr);
-                }
-                continue;
-            }
+            if (cross <= 0.0f) continue;
         }
 
         // UV coordinates from triangle struct (s10.5 fixed-point → s16)
@@ -1308,44 +1222,8 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
             v2_tc = raw_v2 / 32.0f;
         }
 
-        int pix_before_tri = g_pixel_write_count;
         rasterize_triangle(v0, v1, v2, u0, v0_tc, u1, v1_tc, u2, v2_tc,
                            tex_enabled != 0, 0); // tile 0 by default
-        int pix_from_tri = g_pixel_write_count - pix_before_tri;
-        g_state.dl_tri_rasterized++;
-        g_state.dl_tri_pixels += pix_from_tri;
-        // Log first few rasterized triangles (both with and without pixels)
-        static int rast_log = 0, rast_zero_log = 0;
-        if (pix_from_tri > 0 && rast_log < 10) {
-            // Sample texel at UV center of triangle for debug
-            uint8_t dbg_tr=0, dbg_tg=0, dbg_tb=0, dbg_ta=0;
-            if (tex_enabled) {
-                float avg_u = (u0 + u1 + u2) / 3.0f;
-                float avg_v = (v0_tc + v1_tc + v2_tc) / 3.0f;
-                sample_texel(0, (int)avg_u, (int)avg_v, dbg_tr, dbg_tg, dbg_tb, dbg_ta);
-            }
-            const TileDescriptor& dbg_td = g_state.tiles[0];
-            fprintf(stderr, "[F3DDKR] RAST_TRI DL#%d: %d pix tex=%d tile(fmt=%d siz=%d tmem=0x%03X line=%d) "
-                    "texsample=(%d,%d,%d,%d) shade=(%d,%d,%d) combine=0x%08X_%08X\n",
-                    g_state.dl_total_count, pix_from_tri, tex_enabled,
-                    dbg_td.format, dbg_td.size, dbg_td.tmem_addr, dbg_td.line,
-                    dbg_tr, dbg_tg, dbg_tb, dbg_ta,
-                    v0.r, v0.g, v0.b,
-                    (uint32_t)(g_state.combine_mode >> 32), (uint32_t)(g_state.combine_mode & 0xFFFFFFFF));
-            fflush(stderr);
-            rast_log++;
-        }
-        // Log first few 0-pixel rasterized triangles (for late DLs)
-        if (pix_from_tri == 0 && g_state.dl_total_count >= 600 && rast_zero_log < 10) {
-            fprintf(stderr, "[F3DDKR] RAST_ZERO DL#%d: screen=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) "
-                    "cw=(%.1f,%.1f,%.1f) cross=%.1f flags=0x%02X sci=(%d,%d)-(%d,%d)\n",
-                    g_state.dl_total_count,
-                    v0.sx, v0.sy, v1.sx, v1.sy, v2.sx, v2.sy,
-                    v0.cw, v1.cw, v2.cw, cross, flags,
-                    g_state.sc_xl, g_state.sc_yl, g_state.sc_xh, g_state.sc_yh);
-            fflush(stderr);
-            rast_zero_log++;
-        }
     }
 
     // Reset vertex index after drawing (matches GLideN64)
@@ -1394,17 +1272,6 @@ static void cmd_texrect(uint32_t w0, uint32_t w1, uint32_t st_word, uint32_t dsd
     uint32_t cycle_type = (g_state.other_mode_h >> CYCLE_TYPE_SHIFT) & CYCLE_TYPE_MASK;
     bool copy_mode = (cycle_type == G_CYC_COPY);
 
-    static int texrect_log = 0;
-    bool do_tr_log = (texrect_log < 20);
-
-    if (do_tr_log) {
-        const TileDescriptor& td = g_state.tiles[tile_idx];
-        fprintf(stderr, "[TEXRECT] #%d rect=(%d,%d)-(%d,%d) tile=%d fmt=%d siz=%d tmem=0x%03X line=%d cycle=%d env=0x%08X\n",
-                texrect_log, x0, y0, x1, y1, tile_idx, td.format, td.size, td.tmem_addr, td.line, cycle_type, g_state.env_color);
-        fflush(stderr);
-    }
-
-    int texrect_pix = 0;
     float cur_t = ft;
     for (int y = y0; y <= y1; y++) {
         float cur_s = fs;
@@ -1414,29 +1281,19 @@ static void cmd_texrect(uint32_t w0, uint32_t w1, uint32_t st_word, uint32_t dsd
             int ti = (int)floorf(cur_t);
             sample_texel(tile_idx, si, ti, tr, tg, tb, ta);
 
-            if (do_tr_log && texrect_pix < 3) {
-                fprintf(stderr, "  [TEXRECT] pix(%d,%d) s=%d t=%d tex=(%d,%d,%d,%d)\n",
-                        x, y, si, ti, tr, tg, tb, ta);
-                fflush(stderr);
-            }
-
             if (copy_mode) {
-                // In copy mode, write texel directly (no combiner)
+                // In copy mode, write texel directly (no combiner/blender)
                 write_fb_pixel(x, y, tr, tg, tb, ta);
             } else {
                 // Run color combiner
                 CombineInput tex_in = { tr, tg, tb, ta };
-                CombineInput shade_in = { 255, 255, 255, 255 }; // TEXRECT has no shade, use white
+                CombineInput shade_in = { 255, 255, 255, 255 }; // TEXRECT has no shade
                 CombineInput out = run_color_combiner(tex_in, shade_in);
                 write_fb_pixel(x, y, out.r, out.g, out.b, out.a);
             }
-            texrect_pix++;
             cur_s += fdsdx;
         }
         cur_t += fdtdy;
-    }
-    if (do_tr_log) {
-        texrect_log++;
     }
 }
 
@@ -1480,13 +1337,6 @@ static void cmd_moveword(uint32_t w0, uint32_t w1) {
         case F3DDKR_MW_MVPMATRIX:
             g_state.active_matrix_index = (w1 >> 6) & 0x3;
             log_cmd(F3DDKR_G_MOVEWORD, "G_MOVEWORD(matrix)", w0, w1);
-            if (g_dl_trace) {
-                int mi = g_state.active_matrix_index;
-                float d = fabsf(g_state.matrices[mi][0][0]) + fabsf(g_state.matrices[mi][1][1]) +
-                          fabsf(g_state.matrices[mi][2][2]) + fabsf(g_state.matrices[mi][3][3]);
-                fprintf(stderr, "[TRACE] SELECT MTX=%d (w1=0x%08X) diag=%.2f\n", mi, w1, d);
-                fflush(stderr);
-            }
             break;
         case F3DDKR_MW_SEGMENT: {
             int seg = offset / 4;
@@ -1497,6 +1347,8 @@ static void cmd_moveword(uint32_t w0, uint32_t w1) {
             break;
         }
         case F3DDKR_MW_FOG:
+            g_state.fog_multiplier = (int16_t)(w1 >> 16);
+            g_state.fog_offset = (int16_t)(w1 & 0xFFFF);
             log_cmd(F3DDKR_G_MOVEWORD, "G_MOVEWORD(fog)", w0, w1);
             break;
         default:
@@ -1533,11 +1385,6 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 log_cmd(op, "G_DL", w0, w1);
                 uint8_t push = (w0 >> 16) & 0xFF;
                 uint32_t sub_addr = resolve_segment(w1);
-                if (g_dl_trace) {
-                    fprintf(stderr, "[TRACE] G_DL: push=%d addr=0x%06X (depth=%d)\n",
-                            push, sub_addr, g_state.dl_stack_depth);
-                    fflush(stderr);
-                }
                 if (push == 0) {
                     // Push: recurse, then continue
                     if (g_state.dl_stack_depth < F3DDKRState::MAX_DL_STACK) {
@@ -1557,11 +1404,6 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 log_cmd(op, "G_DMADL", w0, w1);
                 int num_cmds = (w0 >> 16) & 0xFF;
                 uint32_t sub_addr = addr_to_phys(w1);
-                if (g_dl_trace) {
-                    fprintf(stderr, "[TRACE] G_DMADL: %d cmds at 0x%06X (depth=%d)\n",
-                            num_cmds, sub_addr, g_state.dl_stack_depth);
-                    fflush(stderr);
-                }
                 if (g_state.dl_stack_depth < F3DDKRState::MAX_DL_STACK) {
                     g_state.dl_stack_depth++;
                     process_dl_recursive(rdram, sub_addr, num_cmds);
@@ -1574,10 +1416,7 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
             case F3DDKR_G_DMA_OFFSETS:
                 g_state.vertex_dma_offset = w1 & 0x00FFFFFF;
                 g_state.matrix_dma_offset = w0 & 0x00FFFFFF;
-                // ALWAYS log DMA offsets (critical for addressing)
-                fprintf(stderr, "[F3DDKR] G_DMA_OFFSETS: mtx_offset=0x%06X vtx_offset=0x%06X (w0=0x%08X w1=0x%08X)\n",
-                        g_state.matrix_dma_offset, g_state.vertex_dma_offset, w0, w1);
-                fflush(stderr);
+                log_cmd(F3DDKR_G_DMA_OFFSETS, "G_DMA_OFFSETS", w0, w1);
                 break;
 
             // === Vertex / Matrix / Triangle ===
@@ -1756,9 +1595,13 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 break;
             }
 
-            // === Geometry mode (no-ops for software rasterizer) ===
+            // === Geometry mode ===
             case 0xB7: // G_SETGEOMETRYMODE
+                g_state.geometry_mode |= w1;
+                g_state.cmd_counts[op]++;
+                break;
             case 0xB6: // G_CLEARGEOMETRYMODE
+                g_state.geometry_mode &= ~w1;
                 g_state.cmd_counts[op]++;
                 break;
 
@@ -1830,79 +1673,18 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
         f3ddkr_init(rdram);
     }
     g_state.rdram = rdram;
-
-    // Reset per-DL state
     g_state.dl_stack_depth = 0;
-
-    // Convert N64 address to physical
-    uint32_t phys = addr_to_phys(dl_addr);
-
     g_state.dl_total_count++;
 
-    // Enable trace for specific DLs (representative DLs with geometry)
-    g_dl_trace = (g_state.dl_total_count == 100 || g_state.dl_total_count == 300 ||
-                  g_state.dl_total_count == 600);
-    if (g_dl_trace) g_fb_write_log_count = 0;
+    uint32_t phys = addr_to_phys(dl_addr);
 
-    if (g_state.dl_total_count <= 5 || (g_state.dl_total_count <= 100 && g_state.dl_total_count % 20 == 0)) {
+    if (g_state.dl_total_count <= 3) {
         fprintf(stderr, "[F3DDKR] Processing DL #%d: addr=0x%08X (phys=0x%06X) size=0x%X\n",
                 g_state.dl_total_count, dl_addr, phys, dl_size);
         fflush(stderr);
     }
 
-    int tri_before = g_state.tri_total_count;
-    int pix_before = g_pixel_write_count;
-
-    // Reset per-DL tracking
-    g_state.dl_sx_min = 9999; g_state.dl_sx_max = -9999;
-    g_state.dl_sy_min = 9999; g_state.dl_sy_max = -9999;
-    g_state.dl_tri_inbounds = 0; g_state.dl_tri_outbounds = 0; g_state.dl_tri_culled = 0;
-    g_state.dl_tri_rasterized = 0; g_state.dl_tri_pixels = 0;
-
     process_dl_recursive(rdram, phys, 0);
-
-    int tri_this_dl = g_state.tri_total_count - tri_before;
-    int pix_this_dl = g_pixel_write_count - pix_before;
-
-    // Periodic summary every 50 DLs with viewport/scissor info
-    if (g_state.dl_total_count % 50 == 0 || g_dl_trace) {
-        fprintf(stderr, "[F3DDKR] === DL #%d: %d tris (%d in, %d out, %d culled, %d rasterized, %d tri_pix), %d total_pix\n"
-                "         vp_scale=(%.1f,%.1f) vp_trans=(%.1f,%.1f) scissor=(%d,%d)-(%d,%d)\n"
-                "         ci=0x%06X active_mtx=%d screen_range=(%.1f-%.1f, %.1f-%.1f) ===\n",
-                g_state.dl_total_count, tri_this_dl,
-                g_state.dl_tri_inbounds, g_state.dl_tri_outbounds, g_state.dl_tri_culled,
-                g_state.dl_tri_rasterized, g_state.dl_tri_pixels,
-                pix_this_dl,
-                g_state.vp_scale_x, g_state.vp_scale_y,
-                g_state.vp_trans_x, g_state.vp_trans_y,
-                g_state.sc_xl, g_state.sc_yl, g_state.sc_xh, g_state.sc_yh,
-                g_state.ci_addr, g_state.active_matrix_index,
-                g_state.dl_sx_min, g_state.dl_sx_max, g_state.dl_sy_min, g_state.dl_sy_max);
-        fflush(stderr);
-    }
-
-    // Check CI framebuffer content after early DLs (to verify TEXRECT writes)
-    if (g_state.dl_total_count <= 10 && g_state.ci_addr != 0 && g_state.ci_size == SIZ_16b && pix_this_dl > 0) {
-        int non_fill = 0, non_zero = 0;
-        uint16_t first_val = 0;
-        int first_x = -1, first_y = -1;
-        uint32_t fb_off = g_state.ci_addr;
-        for (int y = 0; y < 240; y++) {
-            for (int x = 0; x < (int)g_state.ci_width; x++) {
-                uint16_t px = rdram_read_u16(g_state.rdram, fb_off + (y * g_state.ci_width + x) * 2);
-                if (px != 0) non_zero++;
-                if (px > 0x0001 && px != 0xFFFC) {
-                    non_fill++;
-                    if (non_fill == 1) { first_val = px; first_x = x; first_y = y; }
-                }
-            }
-        }
-        fprintf(stderr, "[F3DDKR] CI FB check after DL#%d: ci=0x%06X non_zero=%d non_fill=%d",
-                g_state.dl_total_count, g_state.ci_addr, non_zero, non_fill);
-        if (first_x >= 0) fprintf(stderr, " first=0x%04X@(%d,%d)", first_val, first_x, first_y);
-        fprintf(stderr, "\n");
-        fflush(stderr);
-    }
 }
 
 uint32_t f3ddkr_get_last_ci_addr() {
