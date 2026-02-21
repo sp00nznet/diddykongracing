@@ -62,10 +62,56 @@ RspExitReason aspMain_wrapper(uint8_t* rdram, uint32_t ucode_addr) {
 // SDL Audio
 // -----------------------------------------------
 static SDL_AudioDeviceID audio_device = 0;
+static int audio_queue_count = 0;
+
+// RDRAM base pointer (set by renderer context init, used for bounds checking)
+extern uint8_t* get_rdram_base();
 
 void queue_audio_samples(int16_t* samples, size_t num_samples) {
-    if (audio_device != 0) {
-        SDL_QueueAudio(audio_device, samples, (Uint32)(num_samples * sizeof(int16_t)));
+    if (audio_device == 0 || num_samples == 0) return;
+
+    // Bounds check: ensure the sample pointer is within committed RDRAM (8MB physical)
+    uint8_t* rdram = get_rdram_base();
+    if (rdram) {
+        uintptr_t offset = (uintptr_t)samples - (uintptr_t)rdram;
+        uintptr_t end = offset + num_samples * sizeof(int16_t);
+        if (offset > 0x800000 || end > 0x800000) {
+            audio_queue_count++;
+            if (audio_queue_count <= 20) {
+                fprintf(stderr, "[DKR-AUDIO] Skipping out-of-bounds buffer: offset=0x%llX size=%zu (call #%d)\n",
+                        (unsigned long long)offset, num_samples, audio_queue_count);
+                fflush(stderr);
+            }
+            return;
+        }
+    }
+
+    // Fix RDRAM byte-order: the XOR 3 byte addressing stores halfwords swapped
+    // within each 32-bit word. Each pair of 16-bit samples needs to be swapped.
+    std::vector<int16_t> fixed(num_samples);
+    for (size_t i = 0; i + 1 < num_samples; i += 2) {
+        fixed[i]     = samples[i + 1];
+        fixed[i + 1] = samples[i];
+    }
+    if (num_samples & 1) {
+        fixed[num_samples - 1] = samples[num_samples - 1];
+    }
+
+    SDL_QueueAudio(audio_device, fixed.data(), (Uint32)(num_samples * sizeof(int16_t)));
+
+    audio_queue_count++;
+    if (audio_queue_count <= 10) {
+        // Scan for non-zero samples in both raw and fixed buffers
+        int raw_nonzero = 0, fixed_nonzero = 0;
+        int16_t raw_max = 0, fixed_max = 0;
+        for (size_t s = 0; s < num_samples; s++) {
+            if (samples[s] != 0) { raw_nonzero++; if (abs(samples[s]) > abs(raw_max)) raw_max = samples[s]; }
+            if (fixed[s] != 0) { fixed_nonzero++; if (abs(fixed[s]) > abs(fixed_max)) fixed_max = fixed[s]; }
+        }
+        fprintf(stderr, "[DKR-AUDIO] Queued %zu samples (call #%d), queued_bytes=%u, raw_nz=%d raw_max=%d fix_nz=%d fix_max=%d\n",
+                num_samples, audio_queue_count, SDL_GetQueuedAudioSize(audio_device),
+                raw_nonzero, (int)raw_max, fixed_nonzero, (int)fixed_max);
+        fflush(stderr);
     }
 }
 
@@ -77,6 +123,8 @@ size_t get_audio_frames_remaining() {
 }
 
 void set_audio_frequency(uint32_t freq) {
+    fprintf(stderr, "[DKR-AUDIO] set_audio_frequency(%u Hz)\n", freq);
+    fflush(stderr);
     if (audio_device != 0) {
         SDL_CloseAudioDevice(audio_device);
     }
@@ -90,7 +138,12 @@ void set_audio_frequency(uint32_t freq) {
     audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
     if (audio_device != 0) {
         SDL_PauseAudioDevice(audio_device, 0);
+        fprintf(stderr, "[DKR-AUDIO] Opened device %u: freq=%d fmt=0x%04X ch=%d samples=%d\n",
+                audio_device, obtained.freq, obtained.format, obtained.channels, obtained.samples);
+    } else {
+        fprintf(stderr, "[DKR-AUDIO] Failed to open device: %s\n", SDL_GetError());
     }
+    fflush(stderr);
 }
 
 // -----------------------------------------------
