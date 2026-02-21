@@ -28,9 +28,14 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 
 ### Audio Pipeline
 - **aspMain**: Recompiled RSP audio microcode (MIPS → C++)
+- **SAVEBUFF/LOADBUFF HLE**: Intercepted broken DMA handlers at dispatch level
+  - dispatch[6] (A_SAVEBUFF) acted as SETBUFF instead of performing DMA write
+  - dispatch[4] (A_LOADBUFF) used hardcoded DMEM address and wrong RDRAM source
+  - Both now read params from DMEM and perform direct byte copy with bounds checking
 - **Resampler**: Fixed infinite loop in op=5 handler (setup/body label split)
 - **Scheduler**: Fixed SI message requeue starvation that blocked SP/DP/VI delivery
-- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS)
+- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS, byte-order corrected)
+- **Status**: Audio tasks process without crashes; investigating silent output (processing pipeline produces zeros)
 
 ### Controls
 | Key | N64 Button | | Key | N64 Button |
@@ -101,7 +106,7 @@ tracking/
 
 ## Known Issues
 
-1. **Audio output not yet verified**: aspMain processes tasks but audible playback needs testing
+1. **Audio output silent**: aspMain processes tasks and SAVEBUFF/LOADBUFF DMA works, but audio processing handlers (ADPCM, ENVMIXER, RESAMPLE, INTERLEAVE) produce zero output
 2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
 3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
 

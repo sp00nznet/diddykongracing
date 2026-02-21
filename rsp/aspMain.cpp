@@ -5,6 +5,24 @@
 static int asp_cmd_count = 0;
 static int asp_task_id = 0;
 
+// [PATCH] HLE intercepts for broken audio DMA commands.
+//
+// DKR's aspMain dispatch table has two broken I/O handlers:
+//   - dispatch[6] (A_SAVEBUFF) → L_1270: acts as SETBUFF (stores params), no DMA write
+//   - dispatch[4] (A_LOADBUFF) → L_123C: hardcoded DMEM addr 0x4C0, uses dispatch
+//     table entry (0x123C) as RDRAM address instead of w1
+//
+// Both SAVEBUFF and LOADBUFF rely on params stored by a preceding SETBUFF (op=8)
+// which goes through L_1270, storing:
+//   params[0] @ r24+0x0 = (w0 & 0xFFFF) + 0x5C0  (dmemin + audio_base)
+//   params[2] @ r24+0x2 = (w1 >> 16) + 0x5C0      (dmemout + audio_base)
+//   params[4] @ r24+0x4 = w1 & 0xFFFF              (byte count)
+//
+// Fix: intercept SAVEBUFF and LOADBUFF at dispatch, read stored params from DMEM,
+// perform direct byte copy, and skip the broken handlers.
+static int savebuff_count = 0;
+static int loadbuff_count = 0;
+
 // Expected dispatch table values (IMEM addresses for audio command handlers)
 static const uint16_t expected_dispatch[16] = {
     0x1118, 0x14A4, 0x11EC, 0x1BA0,
@@ -53,11 +71,27 @@ static void asp_dma_rdram_to_dmem(uint8_t* rdram, uint32_t dmem_addr, uint32_t d
     }
 }
 
+static int asp_dma_write_count = 0;
+
 static void asp_dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_t dram_addr, uint32_t wr_len_reg) {
     uint32_t length = (wr_len_reg & 0xFFF) + 1;
     uint32_t count = ((wr_len_reg >> 12) & 0xFF) + 1;
     uint32_t skip = (wr_len_reg >> 20) & 0xFFF;
+    uint32_t orig_dram = dram_addr;
     dram_addr &= 0xFFFFF8;
+
+    asp_dma_write_count++;
+    if (asp_task_id <= 3) {
+        // Check if DMEM source has non-zero data
+        int nz = 0;
+        for (uint32_t i = 0; i < length * count && i < 256; i++) {
+            if (RSP_MEM_BU(i, dmem_addr) != 0) nz++;
+        }
+        fprintf(stderr, "[ASP-DMA-WR] t%d #%d: dmem=0x%03X dram=0x%06X len=%u cnt=%u skip=%u dmem_nz=%d\n",
+                asp_task_id, asp_dma_write_count, dmem_addr, dram_addr, length, count, skip, nz);
+        fflush(stderr);
+    }
+
     for (uint32_t row = 0; row < count; row++) {
         for (uint32_t i = 0; i < length; i++) {
             MEM_B(0, (int64_t)(int32_t)(dram_addr + i + 0x80000000)) = RSP_MEM_B(i, dmem_addr);
@@ -201,6 +235,79 @@ L_1064:
     // On real RSP hardware this is harmless (table already consumed), but in the
     // recomp we re-read it for every command. The table never changes, so use
     // the known-good static copy.
+    if ((r1 / 2) >= 16) {
+        fprintf(stderr, "[ASP] Bad opcode: r1=%u (op=%u) w0=0x%08X w1=0x%08X task#%d cmd#%d r29=0x%X r30=%d\n",
+                r1, r1/2, r26, r25, asp_task_id, asp_cmd_count, r29, (int32_t)r30);
+        fflush(stderr);
+        return RspExitReason::Broke;
+    }
+    // [PATCH] HLE intercepts for SAVEBUFF (op=6) and LOADBUFF (op=4).
+    //
+    // DKR aspMain has TWO SETBUFF-like handlers:
+    //   L_1270 (dispatch[6]): stores params[0..4] with +0x5C0 DMEM offset
+    //   L_12F0 (dispatch[8]): stores params[0x10..0x14] raw
+    //
+    // SETBUFF (op=8) dispatches to L_12F0, storing:
+    //   params[0x10] = w0 & 0xFFFF  (dmemin, raw)
+    //   params[0x12] = opcode*2     (not useful)
+    //   params[0x14] = w1 & 0xFFFF  (byte count)
+    //
+    // Audio buffer base in DMEM = 0x5C0. INTERLEAVE output goes to DMEM[0x5C0].
+    // SAVEBUFF writes from DMEM[0x5C0] to RDRAM (physical address in w1).
+    // LOADBUFF reads from RDRAM (physical address in w1) to DMEM[dmemin + 0x5C0].
+    if ((r1 / 2) == 6) {
+        // A_SAVEBUFF: DMA write from DMEM to RDRAM.
+        // Count from params[0x14] (set by preceding SETBUFF op=8 via L_12F0).
+        // DMEM source = 0x5C0 (audio buffer base; SETBUFF dmemout is always 0 for save).
+        // RDRAM dest = SAVEBUFF w1 (r25) = physical RDRAM address.
+        uint16_t byte_count = RSP_MEM_HU_LOAD(0x14, r24);
+        uint32_t dmem_src   = 0x5C0;
+        uint32_t rdram_dst  = r25 & 0x7FFFFF;
+
+        savebuff_count++;
+        if (savebuff_count <= 20) {
+            int nz = 0;
+            for (uint32_t i = 0; i < byte_count && i < 64; i++) {
+                if (RSP_MEM_BU(i, dmem_src) != 0) nz++;
+            }
+            fprintf(stderr, "[ASP] SAVEBUFF #%d: dmem=0x%03X rdram=0x%06X count=%u nz=%d (t%d cmd#%d)\n",
+                    savebuff_count, dmem_src, rdram_dst, byte_count, nz, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+
+        if (byte_count > 0 && rdram_dst + byte_count <= 0x800000) {
+            for (uint32_t i = 0; i < byte_count; i++) {
+                rdram[(rdram_dst + i) ^ 3] = RSP_MEM_BU(i, dmem_src);
+            }
+        }
+        // Skip L_1270 (which misinterprets SAVEBUFF as SETBUFF, corrupting AUX params).
+        goto L_1098;
+    }
+    if ((r1 / 2) == 4) {
+        // A_LOADBUFF: DMA read from RDRAM to DMEM.
+        // DMEM dest = params[0x10] + 0x5C0 (dmemin + audio base).
+        // Count from params[0x14].
+        // RDRAM source = LOADBUFF w1 (r25) = physical RDRAM address.
+        uint16_t dmemin     = RSP_MEM_HU_LOAD(0x10, r24);
+        uint16_t byte_count = RSP_MEM_HU_LOAD(0x14, r24);
+        uint32_t dmem_dst   = (dmemin + 0x5C0) & 0xFFF;
+        uint32_t rdram_src  = r25 & 0x7FFFFF;
+
+        loadbuff_count++;
+        if (loadbuff_count <= 20) {
+            fprintf(stderr, "[ASP] LOADBUFF #%d: rdram=0x%06X dmem=0x%03X count=%u dmemin=%u (t%d cmd#%d)\n",
+                    loadbuff_count, rdram_src, dmem_dst, byte_count, dmemin, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+
+        if (byte_count > 0 && rdram_src + byte_count <= 0x800000) {
+            for (uint32_t i = 0; i < byte_count; i++) {
+                RSP_MEM_B(i, dmem_dst) = rdram[(rdram_src + i) ^ 3];
+            }
+        }
+        // Skip L_123C (which uses hardcoded DMEM 0x4C0 and wrong RDRAM address).
+        goto L_1098;
+    }
     r2 = expected_dispatch[r1 / 2];
     // jr          $2
     jump_target = r2;
@@ -2602,12 +2709,13 @@ do_indirect_jump:
         case 0x1758: goto L_1758;
         case 0x1480: goto L_1480;
     }
-    printf("Unhandled jump target 0x%04X in microcode aspMain, coming from [%s:%d]\n", jump_target, debug_file, debug_line);
-    printf("Register dump: r0  = %08X r1  = %08X r2  = %08X r3  = %08X r4  = %08X r5  = %08X r6  = %08X r7  = %08X\n"
+    fprintf(stderr, "Unhandled jump target 0x%04X in microcode aspMain, coming from [%s:%d]\n", jump_target, debug_file, debug_line);
+    fprintf(stderr, "Register dump: r0  = %08X r1  = %08X r2  = %08X r3  = %08X r4  = %08X r5  = %08X r6  = %08X r7  = %08X\n"
            "               r8  = %08X r9  = %08X r10 = %08X r11 = %08X r12 = %08X r13 = %08X r14 = %08X r15 = %08X\n"
            "               r16 = %08X r17 = %08X r18 = %08X r19 = %08X r20 = %08X r21 = %08X r22 = %08X r23 = %08X\n"
            "               r24 = %08X r25 = %08X r26 = %08X r27 = %08X r28 = %08X r29 = %08X r30 = %08X r31 = %08X\n",
            0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15, r16,
            r17, r18, r19, r20, r21, r22, r23, r24, r25, r26, r27, r28, r29, r30, r31);
+    fflush(stderr);
     return RspExitReason::UnhandledJumpTarget;
 }

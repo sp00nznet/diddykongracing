@@ -16,12 +16,17 @@
 // SDL window from main.cpp
 extern SDL_Window* get_sdl_window();
 
+// Global RDRAM base pointer for bounds checking in audio callbacks
+static uint8_t* g_rdram_base = nullptr;
+uint8_t* get_rdram_base() { return g_rdram_base; }
+
 // Pure software framebuffer renderer - reads N64 framebuffer from RDRAM via VI registers
 // and displays it using SDL window surface (no GPU renderer needed).
 class SoftwareRendererContext : public ultramodern::renderer::RendererContext {
 public:
     SoftwareRendererContext(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode)
         : rdram_(rdram) {
+        g_rdram_base = rdram;
         vi_regs_ = ultramodern::renderer::get_vi_regs();
         setup_result = ultramodern::renderer::SetupResult::Success;
 
