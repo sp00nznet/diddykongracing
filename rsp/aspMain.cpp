@@ -4,24 +4,108 @@
 #include <cstring>
 static int asp_cmd_count = 0;
 static int asp_task_id = 0;
+static int asp_adpcm_cmd_count = 0;
+extern "C" int g_asp_task_id = 0; // global, readable from other files
 
-// [PATCH] HLE intercepts for broken audio DMA commands.
+// [PATCH] HLE intercepts for broken audio commands.
 //
-// DKR's aspMain dispatch table has two broken I/O handlers:
-//   - dispatch[6] (A_SAVEBUFF) → L_1270: acts as SETBUFF (stores params), no DMA write
-//   - dispatch[4] (A_LOADBUFF) → L_123C: hardcoded DMEM addr 0x4C0, uses dispatch
-//     table entry (0x123C) as RDRAM address instead of w1
+// DKR's aspMain has several broken/no-op dispatch handlers:
+//   - dispatch[2] (A_CLEARBUFF) → L_11EC: reads 1 byte from wrong RDRAM addr (no-op)
+//   - dispatch[4] (A_LOADBUFF)  → L_123C: hardcoded DMEM 0x4C0, wrong RDRAM source
+//   - dispatch[6] (A_SAVEBUFF)  → L_1270: sets params only, NO DMA write to RDRAM
+//   - dispatch[12] (A_MIXER)    → L_1E3C: enters at loop body, skipping ALL setup
+//   - dispatch[13] (A_INTERLEAVE) → L_1390: enters at loop continuation (no-op)
 //
-// Both SAVEBUFF and LOADBUFF rely on params stored by a preceding SETBUFF (op=8)
-// which goes through L_1270, storing:
-//   params[0] @ r24+0x0 = (w0 & 0xFFFF) + 0x5C0  (dmemin + audio_base)
-//   params[2] @ r24+0x2 = (w1 >> 16) + 0x5C0      (dmemout + audio_base)
-//   params[4] @ r24+0x4 = w1 & 0xFFFF              (byte count)
+// The microcode has ZERO calls to the DMA write subroutine (L_1144).
+// On real N64 hardware, aspMain never writes processed audio back to RDRAM.
+// POLEF, RESAMPLE etc. process audio entirely within DMEM.
 //
-// Fix: intercept SAVEBUFF and LOADBUFF at dispatch, read stored params from DMEM,
-// perform direct byte copy, and skip the broken handlers.
+// Fix: HLE intercept CLEARBUFF, LOADBUFF, MIXER, INTERLEAVE, and SAVEBUFF.
+// MIXER implements the full VMULF/VMACF accumulation that the native handler
+// skips due to entering at the loop body without register initialization.
+// SAVEBUFF runs L_1270's param logic (needed by other commands) and
+// only does DMA write after INTERLEAVE (for the final stereo output).
 static int savebuff_count = 0;
 static int loadbuff_count = 0;
+static bool did_interleave = false;  // Set by INTERLEAVE, consumed by SAVEBUFF
+
+// ============================================================================
+// naudio HLE state — matches mupen64plus naudio_dk implementation
+// ============================================================================
+// DKR uses the naudio variant of aspMain (same as Banjo-Kazooie).
+// The raw microcode dispatch table has critical bugs:
+//   - dispatch[9] (SETVOL) → L_132C: actually an interleave handler, NOT SETVOL
+//   - dispatch[3] (ENVMIXER) reads params[0,2] for L/R addresses but they're
+//     never set correctly by the broken SETVOL handler
+// Fix: Full HLE for both SETVOL and ENVMIXER based on mupen64plus reference.
+
+// DKR DMEM buffer layout (all offsets relative to audio base 0x5C0):
+// INPUT      = 0x000 → DMEM 0x5C0   (mono input from RESAMPLE/ADPCM)
+// DRY_LEFT   = 0x440 → DMEM 0xA00   (left dry output accumulator)
+// DRY_RIGHT  = 0x580 → DMEM 0xB40   (right dry output accumulator)
+// WET_LEFT   = 0x6C0 → DMEM 0xC80   (left wet/reverb accumulator)
+// WET_RIGHT  = 0x800 → DMEM 0xDC0   (right wet/reverb accumulator)
+// ENVMIXER processes 160 samples (320 bytes) per voice.
+
+static struct {
+    int16_t vol[2];       // current volume: [0]=left, [1]=right
+    int16_t target[2];    // target volume: [0]=left, [1]=right
+    int32_t rate[2];      // volume ramp rate: [0]=left, [1]=right
+    int16_t dry;          // dry send level
+    int16_t wet;          // wet/reverb send level
+} naudio_state;
+
+// Helper: read a big-endian 16-bit signed sample from DMEM
+static inline int16_t dmem_read_s16(uint32_t addr) {
+    addr &= 0xFFF;
+    return (int16_t)((RSP_MEM_BU(0, addr) << 8) | RSP_MEM_BU(1, addr));
+}
+
+// Helper: write a big-endian 16-bit signed sample to DMEM
+static inline void dmem_write_s16(uint32_t addr, int16_t val) {
+    addr &= 0xFFF;
+    RSP_MEM_B(0, addr) = (uint8_t)((uint16_t)val >> 8);
+    RSP_MEM_B(1, addr) = (uint8_t)((uint16_t)val & 0xFF);
+}
+
+// Helper: clamp int32 to int16 range
+static inline int16_t clamp16(int32_t v) {
+    if (v > 32767) return 32767;
+    if (v < -32768) return -32768;
+    return (int16_t)v;
+}
+
+// RDRAM helpers: read/write big-endian values with XOR 3 byte order
+static inline int16_t rdram_read_s16(uint8_t* rdram, uint32_t addr) {
+    return (int16_t)((rdram[addr ^ 3] << 8) | rdram[(addr + 1) ^ 3]);
+}
+static inline void rdram_write_s16(uint8_t* rdram, uint32_t addr, int16_t val) {
+    rdram[addr ^ 3] = (uint8_t)((uint16_t)val >> 8);
+    rdram[(addr + 1) ^ 3] = (uint8_t)((uint16_t)val & 0xFF);
+}
+static inline int32_t rdram_read_s32(uint8_t* rdram, uint32_t addr) {
+    return (int32_t)(
+        ((uint32_t)rdram[addr ^ 3] << 24) |
+        ((uint32_t)rdram[(addr + 1) ^ 3] << 16) |
+        ((uint32_t)rdram[(addr + 2) ^ 3] << 8) |
+        (uint32_t)rdram[(addr + 3) ^ 3]
+    );
+}
+static inline void rdram_write_s32(uint8_t* rdram, uint32_t addr, int32_t val) {
+    rdram[addr ^ 3] = (uint8_t)((uint32_t)val >> 24);
+    rdram[(addr + 1) ^ 3] = (uint8_t)((uint32_t)val >> 16);
+    rdram[(addr + 2) ^ 3] = (uint8_t)((uint32_t)val >> 8);
+    rdram[(addr + 3) ^ 3] = (uint8_t)((uint32_t)val & 0xFF);
+}
+
+// ENVMIXER state buffer layout in RDRAM (80 bytes = 0x50):
+// Offsets 0x00-0x0F: v20 (8x int16_t) — left dry volume per sample group
+// Offsets 0x10-0x1F: v21 (8x int16_t) — right dry volume per sample group
+// Offsets 0x20-0x2F: v18 (8x int16_t) — left wet volume per sample group
+// Offsets 0x30-0x3F: v19 (8x int16_t) — right wet volume per sample group
+// Offsets 0x40-0x4F: v24 (8x int16_t) — envelope state (targets/rates)
+// For A_INIT: we initialize from naudio_state set by SETVOL commands.
+// For A_CONTINUE: we load from RDRAM and resume where we left off.
 
 // Expected dispatch table values (IMEM addresses for audio command handlers)
 static const uint16_t expected_dispatch[16] = {
@@ -100,26 +184,24 @@ static void asp_dma_dmem_to_rdram(uint8_t* rdram, uint32_t dmem_addr, uint32_t d
         dram_addr += length + skip;
     }
 }
+static int op_hist[16] = {};
 RspExitReason aspMain(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {
     asp_cmd_count = 0;
     asp_task_id++;
-    fprintf(stderr, "[ASP] === Starting aspMain task #%d ===\n", asp_task_id);
-    // Verify dispatch table was loaded correctly by the framework
-    {
-        fprintf(stderr, "[ASP] Initial dispatch table:");
-        for (int i = 0; i < 16; i++) {
-            fprintf(stderr, " %04X", (uint16_t)RSP_MEM_HU_LOAD(0x10, i * 2));
-        }
-        fprintf(stderr, "\n");
-        fflush(stderr);
-    }
-    uint32_t           r1 = 0,  r2 = 0,  r3 = 0,  r4 = 0,  r5 = 0,  r6 = 0,  r7 = 0;
-    uint32_t  r8 = 0,  r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
-    uint32_t r16 = 0, r17 = 0, r18 = 0, r19 = 0, r20 = 0, r21 = 0, r22 = 0, r23 = 0;
-    uint32_t r24 = 0, r25 = 0, r26 = 0, r27 = 0, r28 = 0, r29 = 0, r30 = 0, r31 = 0;
-    uint32_t dma_mem_address = 0, dma_dram_address = 0, jump_target = 0;
+    g_asp_task_id = asp_task_id;
+    memset(op_hist, 0, sizeof(op_hist));
+    // RSP general-purpose registers persist across tasks on real N64 hardware.
+    // Making them static matches this behavior. The startup code below reinitializes
+    // the registers it needs (r1, r24, r23, r28, r27) each task. Critical for audio:
+    // r10 is set by RESAMPLE and checked by ENVMIXER — if r10==0, ENVMIXER skips all
+    // voice processing. Without persistence, the first ENVMIXER in each task gets r10=0.
+    static uint32_t           r1 = 0,  r2 = 0,  r3 = 0,  r4 = 0,  r5 = 0,  r6 = 0,  r7 = 0;
+    static uint32_t  r8 = 0,  r9 = 0, r10 = 0, r11 = 0, r12 = 0, r13 = 0, r14 = 0, r15 = 0;
+    static uint32_t r16 = 0, r17 = 0, r18 = 0, r19 = 0, r20 = 0, r21 = 0, r22 = 0, r23 = 0;
+    static uint32_t r24 = 0, r25 = 0, r26 = 0, r27 = 0, r28 = 0, r29 = 0, r30 = 0, r31 = 0;
+    static uint32_t dma_mem_address = 0, dma_dram_address = 0, jump_target = 0;
     const char * debug_file = NULL; int debug_line = 0;
-    RSP rsp{};
+    static RSP rsp{};  // Persist DMEM across tasks (like real N64 RSP)
     r1 = 0xFC0;
     // addi        $24, $zero, 0x360
     r24 = RSP_ADD32(0, 0X360);
@@ -129,6 +211,31 @@ RspExitReason aspMain(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {
     r28 = RSP_MEM_W_LOAD(0X30, r1);
     // lw          $27, 0x34($1)
     r27 = RSP_MEM_W_LOAD(0X34, r1);
+    static uint32_t saved_data_size = 0;
+    saved_data_size = r27;
+    // Diagnostic: log ucode_data_size, dispatch table, and ENVMIXER params
+    if (asp_task_id <= 3 || (asp_task_id >= 91 && asp_task_id <= 92)) {
+        uint32_t udata_sz = RSP_MEM_W_LOAD(0x1C, 0xFC0);  // task->t.ucode_data_size from DMEM
+        uint16_t p0 = RSP_MEM_HU_LOAD(0x0, r24);  // params[0] (L output addr)
+        uint16_t p2 = RSP_MEM_HU_LOAD(0x2, r24);  // params[2] (R output addr)
+        fprintf(stderr, "[ASP] t%d: ucode_data_size=0x%X, data_size(cmds)=0x%X, params[0]=0x%04X params[2]=0x%04X\n",
+                asp_task_id, udata_sz, r27, p0, p2);
+        // Dump dispatch table from DMEM
+        if (asp_task_id == 1) {
+            fprintf(stderr, "[ASP] Dispatch table from DMEM:");
+            for (int i = 0; i < 16; i++) {
+                fprintf(stderr, " [%d]=0x%04X", i, (uint16_t)RSP_MEM_HU_LOAD(0x10, i * 2));
+            }
+            fprintf(stderr, "\n");
+            // Dump params[0x10..0x1F]
+            fprintf(stderr, "[ASP] Params[0x10..0x1E]:");
+            for (int i = 0; i < 8; i++) {
+                fprintf(stderr, " 0x%04X", (uint16_t)RSP_MEM_HU_LOAD(0x10 + i * 2, r24));
+            }
+            fprintf(stderr, "\n");
+        }
+        fflush(stderr);
+    }
     // mfc0        $5, DPC_STATUS
     r5 = 0;
     // andi        $4, $5, 0x1
@@ -211,11 +318,18 @@ L_1064:
     r1 = S32(U32(r26) >> 23);
     // andi        $1, $1, 0xFE
     r1 = r1 & 0XFE;
-    // [DEBUG] Trace command dispatch (reduced verbosity)
+    // [DEBUG] Trace command dispatch
     asp_cmd_count++;
-    if (asp_task_id <= 3) {
-        fprintf(stderr, "[ASP] t%d cmd#%d: op=%d w0=0x%08X w1=0x%08X\n",
-            asp_task_id, asp_cmd_count, r1/2, r26, r25);
+    if (r1/2 < 16) op_hist[r1/2]++;
+    // Dump commands around the first voice (incl. SETBUFF/SAVEBUFF/RESAMPLE/ENVMIXER)
+    if (asp_task_id == 91 && asp_cmd_count <= 30) {
+        uint16_t p0  = RSP_MEM_HU_LOAD(0x0, r24);
+        uint16_t p2  = RSP_MEM_HU_LOAD(0x2, r24);
+        uint16_t p10 = RSP_MEM_HU_LOAD(0x10, r24);
+        uint16_t p12 = RSP_MEM_HU_LOAD(0x12, r24);
+        uint16_t p14 = RSP_MEM_HU_LOAD(0x14, r24);
+        fprintf(stderr, "[ASP] t91 cmd#%d: op=%d w0=0x%08X w1=0x%08X  p[0]=0x%03X p[2]=0x%03X p[10]=0x%03X p[12]=0x%03X p[14]=0x%03X\n",
+                asp_cmd_count, r1/2, r26, r25, p0, p2, p10, p12, p14);
         fflush(stderr);
     }
     // addi        $28, $28, 0x8
@@ -241,71 +355,521 @@ L_1064:
         fflush(stderr);
         return RspExitReason::Broke;
     }
-    // [PATCH] HLE intercepts for SAVEBUFF (op=6) and LOADBUFF (op=4).
-    //
-    // DKR aspMain has TWO SETBUFF-like handlers:
-    //   L_1270 (dispatch[6]): stores params[0..4] with +0x5C0 DMEM offset
-    //   L_12F0 (dispatch[8]): stores params[0x10..0x14] raw
-    //
-    // SETBUFF (op=8) dispatches to L_12F0, storing:
-    //   params[0x10] = w0 & 0xFFFF  (dmemin, raw)
-    //   params[0x12] = opcode*2     (not useful)
-    //   params[0x14] = w1 & 0xFFFF  (byte count)
-    //
-    // Audio buffer base in DMEM = 0x5C0. INTERLEAVE output goes to DMEM[0x5C0].
-    // SAVEBUFF writes from DMEM[0x5C0] to RDRAM (physical address in w1).
-    // LOADBUFF reads from RDRAM (physical address in w1) to DMEM[dmemin + 0x5C0].
-    if ((r1 / 2) == 6) {
-        // A_SAVEBUFF: DMA write from DMEM to RDRAM.
-        // Count from params[0x14] (set by preceding SETBUFF op=8 via L_12F0).
-        // DMEM source = 0x5C0 (audio buffer base; SETBUFF dmemout is always 0 for save).
-        // RDRAM dest = SAVEBUFF w1 (r25) = physical RDRAM address.
-        uint16_t byte_count = RSP_MEM_HU_LOAD(0x14, r24);
-        uint32_t dmem_src   = 0x5C0;
-        uint32_t rdram_dst  = r25 & 0x7FFFFF;
-
-        savebuff_count++;
-        if (savebuff_count <= 20) {
-            int nz = 0;
-            for (uint32_t i = 0; i < byte_count && i < 64; i++) {
-                if (RSP_MEM_BU(i, dmem_src) != 0) nz++;
-            }
-            fprintf(stderr, "[ASP] SAVEBUFF #%d: dmem=0x%03X rdram=0x%06X count=%u nz=%d (t%d cmd#%d)\n",
-                    savebuff_count, dmem_src, rdram_dst, byte_count, nz, asp_task_id, asp_cmd_count);
+    if ((r1 / 2) == 1) {
+        asp_adpcm_cmd_count++;
+        if (asp_adpcm_cmd_count <= 5) {
+            fprintf(stderr, "[ASP] ADPCM cmd! t%d cmd#%d total_adpcm=%d w0=0x%08X w1=0x%08X\n",
+                    asp_task_id, asp_cmd_count, asp_adpcm_cmd_count, r26, r25);
             fflush(stderr);
         }
-
-        if (byte_count > 0 && rdram_dst + byte_count <= 0x800000) {
-            for (uint32_t i = 0; i < byte_count; i++) {
-                rdram[(rdram_dst + i) ^ 3] = RSP_MEM_BU(i, dmem_src);
-            }
+    }
+    // Log ALL SETVOL (op=9) and ENVMIXER (op=3) commands
+    if ((r1 / 2) == 9) {
+        static int setvol_count = 0;
+        setvol_count++;
+        if (setvol_count <= 20) {
+            fprintf(stderr, "[ASP] SETVOL #%d: w0=0x%08X w1=0x%08X flags=0x%02X (t%d cmd#%d)\n",
+                    setvol_count, r26, r25, (U32(r26) >> 16) & 0xFF, asp_task_id, asp_cmd_count);
+            fflush(stderr);
         }
-        // Skip L_1270 (which misinterprets SAVEBUFF as SETBUFF, corrupting AUX params).
+    }
+    if ((r1 / 2) == 3) {
+        static int envmixer_total = 0;
+        envmixer_total++;
+        if (envmixer_total <= 20) {
+            uint8_t env_flags = (U32(r26) >> 16) & 0xFF;
+            fprintf(stderr, "[ASP] ENVMIXER #%d: w0=0x%08X w1=0x%08X flags=0x%02X init=%d aux=%d (t%d cmd#%d)\n",
+                    envmixer_total, r26, r25, env_flags, env_flags & 1, (env_flags >> 3) & 1,
+                    asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
+    // [PATCH] HLE intercepts for broken audio command handlers.
+    // Uses naudio_dk encoding per mupen64plus: w0[11:0]=dmem, w0[23:12]=count,
+    // w1=rdram_addr. Audio base offset = 0x5C0.
+    //
+    // CLEARBUFF (op=2): L_11EC is a no-op. HLE zeros the specified DMEM buffer.
+    // LOADBUFF (op=4): L_123C is broken. HLE does DMA read (RDRAM→DMEM).
+    // SAVEBUFF (op=6): L_1270 only sets params. HLE does DMA write (DMEM→RDRAM).
+    // MIXER (op=12): dispatch[12]=L_1E3C enters at loop body, skipping ALL
+    //   setup (r1,r2,r17,r18,v31). HLE implements full VMULF/VMACF mixer.
+    // INTERLEAVE (op=13): L_1390 is broken. HLE interleaves L/R channels.
+    if ((r1 / 2) == 2) {
+        // A_CLEARBUFF: Zero DMEM buffer.
+        // w0[15:0] = DMEM offset (relative to audio base 0x5C0)
+        // w1[15:0] = byte count
+        uint16_t dmem_off = r26 & 0xFFFF;
+        uint16_t count    = r25 & 0xFFFF;
+        uint32_t dmem_addr = (dmem_off + 0x5C0) & 0xFFF;
+        for (uint16_t i = 0; i < count; i++) {
+            RSP_MEM_B(i, dmem_addr) = 0;
+        }
+        static int clearbuff_log = 0;
+        clearbuff_log++;
+        if (clearbuff_log <= 40) {
+            fprintf(stderr, "[ASP] CLEARBUFF #%d: off=0x%03X dmem=0x%03X count=%u (t%d cmd#%d)\n",
+                    clearbuff_log, dmem_off, dmem_addr, count, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
         goto L_1098;
     }
     if ((r1 / 2) == 4) {
         // A_LOADBUFF: DMA read from RDRAM to DMEM.
-        // DMEM dest = params[0x10] + 0x5C0 (dmemin + audio base).
-        // Count from params[0x14].
-        // RDRAM source = LOADBUFF w1 (r25) = physical RDRAM address.
-        uint16_t dmemin     = RSP_MEM_HU_LOAD(0x10, r24);
-        uint16_t byte_count = RSP_MEM_HU_LOAD(0x14, r24);
-        uint32_t dmem_dst   = (dmemin + 0x5C0) & 0xFFF;
-        uint32_t rdram_src  = r25 & 0x7FFFFF;
+        //
+        // naudio encoding (DKR uses alist_process_naudio_dk per mupen64plus):
+        //   w0[11:0]  = DMEM offset (relative to audio base 0x5C0)
+        //   w0[23:12] = byte count
+        //   w1        = RDRAM physical address
+        //
+        // Fallback to SETBUFF params if naudio count is 0.
+        uint16_t na_dmem  = r26 & 0xFFF;
+        uint16_t na_count = (U32(r26) >> 12) & 0xFFF;
+        uint16_t sb_dmem  = RSP_MEM_HU_LOAD(0x10, r24);
+        uint16_t sb_count = RSP_MEM_HU_LOAD(0x14, r24);
+
+        uint16_t byte_count = na_count > 0 ? na_count : sb_count;
+        uint16_t dmem_off   = na_count > 0 ? na_dmem : sb_dmem;
+        uint32_t dmem_dst   = (dmem_off + 0x5C0) & 0xFFF;
+        uint32_t rdram_src  = r25 & 0xFFFFFF;
 
         loadbuff_count++;
-        if (loadbuff_count <= 20) {
-            fprintf(stderr, "[ASP] LOADBUFF #%d: rdram=0x%06X dmem=0x%03X count=%u dmemin=%u (t%d cmd#%d)\n",
-                    loadbuff_count, rdram_src, dmem_dst, byte_count, dmemin, asp_task_id, asp_cmd_count);
-            fflush(stderr);
-        }
 
         if (byte_count > 0 && rdram_src + byte_count <= 0x800000) {
             for (uint32_t i = 0; i < byte_count; i++) {
                 RSP_MEM_B(i, dmem_dst) = rdram[(rdram_src + i) ^ 3];
             }
         }
-        // Skip L_123C (which uses hardcoded DMEM 0x4C0 and wrong RDRAM address).
+
+        if (loadbuff_count <= 20) {
+            int rdram_nz = 0, dmem_nz = 0;
+            for (uint32_t i = 0; i < byte_count && i < 64; i++) {
+                if (rdram[(rdram_src + i) ^ 3] != 0) rdram_nz++;
+                if (RSP_MEM_BU(i, dmem_dst) != 0) dmem_nz++;
+            }
+            fprintf(stderr, "[ASP] LOADBUFF #%d: rdram=0x%06X dmem=0x%03X count=%u(na=%u sb=%u) rdram_nz=%d dmem_nz=%d (t%d cmd#%d)\n",
+                    loadbuff_count, rdram_src, dmem_dst, byte_count, na_count, sb_count, rdram_nz, dmem_nz, asp_task_id, asp_cmd_count);
+            fprintf(stderr, "[ASP]   RDRAM[0x%06X]:", rdram_src);
+            for (int j = 0; j < 16 && j < (int)byte_count; j++)
+                fprintf(stderr, " %02X", rdram[(rdram_src + j) ^ 3]);
+            fprintf(stderr, "\n");
+            fflush(stderr);
+        }
+        goto L_1098;
+    }
+    if ((r1 / 2) == 6) {
+        // A_SAVEBUFF: DMA write from DMEM to RDRAM.
+        //
+        // DKR's SAVEBUFF doesn't encode count in w0 (lower 24 bits are 0).
+        // Use SETBUFF params[0x14] as byte count, same fallback as LOADBUFF.
+        // DMEM source: (w0[11:0] + 0x5C0) & 0xFFF = 0x5C0 for most calls.
+        // RDRAM dest:  w1 & 0xFFFFFF.
+        //
+        // Also update params for the raw microcode path (L_1270 compatibility):
+        uint32_t flags = (U32(r26) >> 16) & 0x8;
+        if (flags == 0) {
+            RSP_MEM_H_STORE(0x0, r24, RSP_ADD32(r26, 0x5C0));
+            RSP_MEM_H_STORE(0x2, r24, RSP_ADD32(S32(U32(r25) >> 16), 0x5C0));
+            RSP_MEM_H_STORE(0x4, r24, r25);
+        } else {
+            RSP_MEM_H_STORE(0xE, r24, RSP_ADD32(r25, 0x5C0));
+            RSP_MEM_H_STORE(0xA, r24, RSP_ADD32(r26, 0x5C0));
+            RSP_MEM_H_STORE(0xC, r24, RSP_ADD32(S32(U32(r25) >> 16), 0x5C0));
+        }
+
+        savebuff_count++;
+
+        // Determine byte count: try naudio encoding first, fall back to SETBUFF
+        uint16_t na_dmem  = r26 & 0xFFF;
+        uint16_t na_count = (U32(r26) >> 12) & 0xFFF;
+        uint16_t sb_dmem  = RSP_MEM_HU_LOAD(0x10, r24);
+        uint16_t sb_count = RSP_MEM_HU_LOAD(0x14, r24);
+
+        uint16_t byte_count = na_count > 0 ? na_count : sb_count;
+        uint16_t dmem_off   = na_count > 0 ? na_dmem : sb_dmem;
+        uint32_t dmem_src   = (dmem_off + 0x5C0) & 0xFFF;
+        uint32_t rdram_dst  = r25 & 0xFFFFFF;
+
+        if (byte_count > 0 && rdram_dst + byte_count <= 0x800000) {
+            for (uint32_t i = 0; i < byte_count; i++) {
+                rdram[(rdram_dst + i) ^ 3] = RSP_MEM_BU(i, dmem_src);
+            }
+        }
+
+        // Log: first 20, after INTERLEAVE, or writes to AI DAC range (0x3F????)
+        if (savebuff_count <= 20 || did_interleave || rdram_dst >= 0x3F0000) {
+            int nz = 0;
+            for (uint32_t i = 0; i < byte_count && i < 64; i++) {
+                if (RSP_MEM_BU(i, dmem_src) != 0) nz++;
+            }
+            const char* tag = did_interleave ? "POST-INTLV" : (rdram_dst >= 0x3F0000 ? "AI-BUF" : "");
+            fprintf(stderr, "[ASP] SAVEBUFF #%d %s: dmem=0x%03X rdram=0x%06X count=%u(na=%u sb=%u) nz=%d flags=0x%X (t%d cmd#%d)\n",
+                    savebuff_count, tag, dmem_src, rdram_dst, byte_count, na_count, sb_count, nz, flags, asp_task_id, asp_cmd_count);
+            if (did_interleave && byte_count >= 16) {
+                fprintf(stderr, "[ASP]   DMEM[0x%03X]:", dmem_src);
+                for (int j = 0; j < 16; j++)
+                    fprintf(stderr, " %02X", RSP_MEM_BU(j, dmem_src));
+                fprintf(stderr, "\n");
+                // Also check what's at RDRAM after the write
+                fprintf(stderr, "[ASP]   RDRAM[0x%06X]:", rdram_dst);
+                for (int j = 0; j < 16; j++)
+                    fprintf(stderr, " %02X", rdram[(rdram_dst + j) ^ 3]);
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr);
+        }
+
+        if (did_interleave) did_interleave = false;
+        goto L_1098;
+    }
+    if ((r1 / 2) == 12) {
+        // A_MIXER: Mix source audio into destination buffer.
+        //
+        // dispatch[12] = 0x1E3C enters at the MIXER loop body, skipping ALL
+        // register setup (r1, r2, r17, r18, v31 initialization). The setup
+        // code at IMEM 0x1DBC is unreachable from dispatch — it's only reached
+        // when ENVMIXER (dispatch[3]) chains into the mixer, but DKR never
+        // sends op=3 commands. This is a microcode bug.
+        //
+        // w0[15:0] = gain (signed Q15 fixed-point)
+        // w1[31:16] = source DMEM offset (relative to audio base 0x5C0)
+        // w1[15:0] = destination DMEM offset (relative to audio base 0x5C0)
+        // Count from params[0x14] (set by preceding SETBUFF op=8)
+        //
+        // Operation: dest[i] = dest[i] * mixer_const + src[i] * gain
+        // mixer_const = DMEM[0x0C..0x0D] (element 6 of vector constant table)
+        uint16_t byte_count = RSP_MEM_HU_LOAD(0x14, r24);  // params[0x14]
+        if (byte_count == 0) {
+            goto L_1098;
+        }
+
+        int16_t gain = (int16_t)(r26 & 0xFFFF);
+        uint16_t src_off = (U32(r25) >> 16) & 0xFFFF;
+        uint16_t dst_off = r25 & 0xFFFF;
+        uint32_t src_addr = (src_off + 0x5C0) & 0xFFF;
+        uint32_t dst_addr = (dst_off + 0x5C0) & 0xFFF;
+
+        // Mixer constant: "1.0" in Q15 = 0x7FFF.
+        // On real RSP, this lives in v31[6] loaded from DMEM[0x0C..0x0D].
+        // But RESAMPLE's SQV stores wrap around DMEM and corrupt the constant table.
+        // Hardcode the known-good value (same fix as the static dispatch table).
+        int16_t mixer_const = 0x7FFF;
+
+        static int mixer_log = 0;
+        mixer_log++;
+        if (mixer_log <= 30) {
+            int src_nz = 0, dst_nz = 0;
+            for (uint32_t i = 0; i < byte_count && i < 32; i++) {
+                if (RSP_MEM_BU(i, src_addr) != 0) src_nz++;
+                if (RSP_MEM_BU(i, dst_addr) != 0) dst_nz++;
+            }
+            fprintf(stderr, "[ASP] MIXER #%d: gain=0x%04X src=0x%03X dst=0x%03X count=%u const=0x%04X src_nz=%d dst_nz=%d (t%d cmd#%d)\n",
+                    mixer_log, (uint16_t)gain, src_addr, dst_addr, byte_count, (uint16_t)mixer_const, src_nz, dst_nz, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+
+        uint16_t num_samples = byte_count / 2;
+        for (uint16_t i = 0; i < num_samples; i++) {
+            uint32_t s_off = (src_addr + i * 2) & 0xFFF;
+            uint32_t d_off = (dst_addr + i * 2) & 0xFFF;
+
+            // Read 16-bit signed samples (big-endian in DMEM)
+            int16_t src_sample = (int16_t)((RSP_MEM_BU(0, s_off) << 8) | RSP_MEM_BU(1, s_off));
+            int16_t dst_sample = (int16_t)((RSP_MEM_BU(0, d_off) << 8) | RSP_MEM_BU(1, d_off));
+
+            // VMULF: acc = dst * mixer_const * 2 + 0x8000 (rounding)
+            // VMACF: acc += src * gain * 2
+            int64_t acc = (int64_t)dst_sample * (int64_t)mixer_const;
+            acc = (acc << 1) + 0x8000;
+            acc += (int64_t)src_sample * (int64_t)gain * 2;
+
+            // Clamp to signed 16-bit
+            int32_t result = (int32_t)(acc >> 16);
+            if (result > 32767) result = 32767;
+            if (result < -32768) result = -32768;
+
+            // Write back (big-endian)
+            RSP_MEM_B(0, d_off) = (uint8_t)(result >> 8);
+            RSP_MEM_B(1, d_off) = (uint8_t)(result & 0xFF);
+        }
+
+        goto L_1098;
+    }
+    if ((r1 / 2) == 13) {
+        // A_INTERLEAVE: Interleave left and right channels into stereo output.
+        // w1[31:16] = left channel DMEM offset, w1[15:0] = right channel DMEM offset
+        // Count from params[0x14] (bytes per channel, set by preceding SETBUFF).
+        // Output goes to DMEM[0x5C0].
+        uint16_t count     = RSP_MEM_HU_LOAD(0x14, r24);
+        uint16_t left_off  = (U32(r25) >> 16) & 0xFFFF;
+        uint16_t right_off = r25 & 0xFFFF;
+        uint32_t left_addr  = (left_off + 0x5C0) & 0xFFF;
+        uint32_t right_addr = (right_off + 0x5C0) & 0xFFF;
+        uint32_t out_addr   = 0x5C0;
+
+        // Interleave: for each sample pair, write left then right.
+        uint16_t num_samples = count / 2;  // samples per channel (count is in bytes)
+        for (uint16_t i = 0; i < num_samples; i++) {
+            // Read 16-bit samples from left and right channels
+            uint8_t lh = RSP_MEM_BU(i * 2,     left_addr);
+            uint8_t ll = RSP_MEM_BU(i * 2 + 1, left_addr);
+            uint8_t rh = RSP_MEM_BU(i * 2,     right_addr);
+            uint8_t rl = RSP_MEM_BU(i * 2 + 1, right_addr);
+            // Write interleaved: L, R, L, R, ...
+            RSP_MEM_B(i * 4,     out_addr) = lh;
+            RSP_MEM_B(i * 4 + 1, out_addr) = ll;
+            RSP_MEM_B(i * 4 + 2, out_addr) = rh;
+            RSP_MEM_B(i * 4 + 3, out_addr) = rl;
+        }
+
+        static int interleave_count = 0;
+        interleave_count++;
+        if (asp_task_id >= 89 && interleave_count <= 100) {
+            int nz = 0;
+            for (uint32_t i = 0; i < count * 2 && i < 640; i++) {
+                if (RSP_MEM_BU(i, out_addr) != 0) nz++;
+            }
+            // Also check the source L/R channel buffers
+            int lnz = 0, rnz = 0;
+            for (uint32_t i = 0; i < count && i < 320; i++) {
+                if (RSP_MEM_BU(i, left_addr) != 0) lnz++;
+                if (RSP_MEM_BU(i, right_addr) != 0) rnz++;
+            }
+            fprintf(stderr, "[ASP] INTERLEAVE #%d: left=0x%03X right=0x%03X out=0x%03X count=%u nz=%d lnz=%d rnz=%d (t%d cmd#%d)\n",
+                    interleave_count, left_addr, right_addr, out_addr, count, nz, lnz, rnz, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+
+        did_interleave = true;
+        goto L_1098;
+    }
+    if ((r1 / 2) == 8) {
+        // A_SETBUFF: Set buffer parameters for the next processing command.
+        //
+        // In naudio, op=8 with flags=0x00 sets MAIN buffers (for RESAMPLE/ADPCM):
+        //   params[0x10] = input, params[0x12] = output, params[0x14] = count
+        // With flags=0x08 it sets AUX buffers (for ENVMIXER aux send):
+        //   params[0x16] = aux dry left, params[0x18] = aux dry right, params[0x1A] = aux wet
+        uint8_t sb_flags = (U32(r26) >> 16) & 0xFF;
+        if (sb_flags & 0x08) {
+            // AUX mode
+            RSP_MEM_H_STORE(0X16, r24, r26);                    // params[0x16] = w0 low16
+            RSP_MEM_H_STORE(0X18, r24, S32(U32(r25) >> 16));    // params[0x18] = w1 high16
+            RSP_MEM_H_STORE(0X1A, r24, r25);                    // params[0x1A] = w1 low16
+        } else {
+            // MAIN mode — store to SETBUFF params (for HLE handlers)
+            RSP_MEM_H_STORE(0X10, r24, r26);                    // params[0x10] = w0 low16 (input)
+            RSP_MEM_H_STORE(0X12, r24, S32(U32(r25) >> 16));    // params[0x12] = w1 high16 (output)
+            RSP_MEM_H_STORE(0X14, r24, r25);                    // params[0x14] = w1 low16 (count)
+            // Also write to params[0,2,4] for raw microcode handlers (RESAMPLE, ADPCM).
+            // DKR's naudio doesn't send SAVEBUFF before each voice, so params[0,2,4]
+            // stay at zero. The raw handlers expect these to be set with +0x5C0 base.
+            RSP_MEM_H_STORE(0x0, r24, RSP_ADD32(r26 & 0xFFFF, 0x5C0));                     // params[0] = input + 0x5C0
+            RSP_MEM_H_STORE(0x2, r24, RSP_ADD32(S32(U32(r25) >> 16) & 0xFFFF, 0x5C0));     // params[2] = output + 0x5C0
+            RSP_MEM_H_STORE(0x4, r24, r25);                                                 // params[4] = count
+        }
+        goto L_1098;
+    }
+    if ((r1 / 2) == 9) {
+        // A_SETVOL HLE: dispatch[9]=L_132C is broken (routes to interleave code).
+        //
+        // DKR sends 5 SETVOL commands per voice (differs from standard naudio):
+        //   0x06 (A_VOL|A_LEFT): vol[0] from w0[15:0]
+        //   0x04 (A_VOL):        vol[1] from w0[15:0]
+        //   0x02 (A_LEFT):       target[0] from w0[15:0], rate[0] from w1
+        //   0x00 (none):         target[1] from w0[15:0], rate[1] from w1
+        //   0x08 (A_AUX):        dry from w0[15:0], wet from w1[15:0]
+        //
+        // Note: standard naudio packs dry/wet into A_VOL|A_LEFT's w1 and
+        // gets vol[1] from ENVMIXER command word. DKR sends w1=0 for A_VOL|A_LEFT
+        // and sends dry/wet separately via A_AUX. DKR's ENVMIXER w0[15:0]=0.
+        uint8_t sv_flags = (U32(r26) >> 16) & 0xFF;
+
+        if (sv_flags & 0x08) {
+            // A_AUX: Set dry and wet send levels
+            naudio_state.dry = (int16_t)(r26 & 0xFFFF);
+            naudio_state.wet = (int16_t)(r25 & 0xFFFF);
+        } else if (sv_flags & 0x04) {
+            // A_VOL: Set current volume
+            if (sv_flags & 0x02) {
+                // A_VOL|A_LEFT: left volume (DKR sends dry/wet=0 in w1, uses A_AUX)
+                naudio_state.vol[0] = (int16_t)(r26 & 0xFFFF);
+            } else {
+                // A_VOL only: right volume
+                naudio_state.vol[1] = (int16_t)(r26 & 0xFFFF);
+            }
+        } else {
+            // A_RATE: Set target volume and ramp rate
+            if (sv_flags & 0x02) {
+                // A_LEFT: left target/rate
+                naudio_state.target[0] = (int16_t)(r26 & 0xFFFF);
+                naudio_state.rate[0] = (int32_t)r25;
+            } else {
+                // A_RIGHT: right target/rate
+                naudio_state.target[1] = (int16_t)(r26 & 0xFFFF);
+                naudio_state.rate[1] = (int32_t)r25;
+            }
+        }
+
+        static int setvol_hle_log = 0;
+        setvol_hle_log++;
+        if (setvol_hle_log <= 30) {
+            fprintf(stderr, "[ASP-HLE] SETVOL #%d: flags=0x%02X w0=0x%08X w1=0x%08X → vol=[%d,%d] tgt=[%d,%d] rate=[%d,%d] dry=%d wet=%d (t%d)\n",
+                    setvol_hle_log, sv_flags, r26, r25,
+                    naudio_state.vol[0], naudio_state.vol[1],
+                    naudio_state.target[0], naudio_state.target[1],
+                    naudio_state.rate[0], naudio_state.rate[1],
+                    naudio_state.dry, naudio_state.wet, asp_task_id);
+            fflush(stderr);
+        }
+        goto L_1098;
+    }
+    if ((r1 / 2) == 3) {
+        // A_ENVMIXER HLE: Linear envelope mixer (mupen64plus alist_envmix_lin).
+        //
+        // w0[17:16] flags: bit 0 = A_INIT (initialize from SETVOL state)
+        //                  bit 3 = A_AUX (enable aux/reverb sends)
+        // w0[15:0] = right channel volume (vol[1])
+        // w1 = segment address of 80-byte state buffer in RDRAM
+        //
+        // The mixer processes the input buffer sample-by-sample, applying
+        // volume envelopes (with linear ramp toward target) and mixing into
+        // 4 output buffers: dry L/R and wet L/R.
+        uint8_t env_flags = (U32(r26) >> 16) & 0xFF;
+        bool is_init = (env_flags & 0x01) != 0;
+        bool has_aux = (env_flags & 0x08) != 0;
+
+        // Note: standard naudio sets vol[1] from ENVMIXER w0[15:0], but DKR sends
+        // 0x0000 here and sets vol[1] via SETVOL flags=0x04 instead. Don't overwrite.
+
+        // Resolve segment address for state buffer
+        uint32_t seg_addr = r25;
+        uint8_t seg_id = (seg_addr >> 24) & 0x0F;
+        uint32_t seg_base = RSP_MEM_W_LOAD(0x320, seg_id * 4);
+        uint32_t rdram_addr = (seg_base + (seg_addr & 0x00FFFFFF)) & 0x7FFFFF;
+
+        // Get buffer parameters from SETBUFF params
+        uint16_t in_off  = RSP_MEM_HU_LOAD(0x10, r24);  // input offset (relative to 0x5C0)
+        uint16_t count   = RSP_MEM_HU_LOAD(0x14, r24);  // byte count
+
+        // DKR naudio buffer addresses
+        uint32_t in_addr  = (in_off + 0x5C0) & 0xFFF;
+        uint32_t dl_addr = 0xA00;  // DRY_LEFT
+        uint32_t dr_addr = 0xB40;  // DRY_RIGHT
+        uint32_t wl_addr = 0xC80;  // WET_LEFT
+        uint32_t wr_addr = 0xDC0;  // WET_RIGHT
+
+        uint16_t num_samples = count / 2;
+        if (num_samples > 160) num_samples = 160;  // safety cap
+
+        // Ramp state: {value, step, target} as int64_t (Q15.16 fixed-point)
+        int64_t ramp_val[2];
+        int64_t ramp_step[2];
+        int64_t ramp_target[2];
+        int16_t dry_gain, wet_gain;
+
+        if (is_init) {
+            // A_INIT: Initialize from SETVOL state
+            // Per mupen64plus: step = rate / 8 (RSP processes 8 samples per vector)
+            ramp_val[0]    = (int64_t)naudio_state.vol[0] << 16;
+            ramp_val[1]    = (int64_t)naudio_state.vol[1] << 16;
+            ramp_target[0] = (int64_t)naudio_state.target[0] << 16;
+            ramp_target[1] = (int64_t)naudio_state.target[1] << 16;
+            ramp_step[0]   = (int64_t)naudio_state.rate[0] / 8;
+            ramp_step[1]   = (int64_t)naudio_state.rate[1] / 8;
+            dry_gain       = naudio_state.dry;
+            wet_gain       = naudio_state.wet;
+        } else {
+            // A_CONTINUE: Load state from RDRAM (self-consistent with our save format)
+            // Layout (byte offsets, big-endian):
+            //   0-1:   wet (int16)
+            //   2-3:   dry (int16)
+            //   4-5:   target[0] hi (int16)
+            //   6-7:   target[1] hi (int16)
+            //   8-11:  step[0] (int32)
+            //   12-15: step[1] (int32)
+            //   16-19: value[0] (int32)
+            //   20-23: value[1] (int32)
+            wet_gain       = rdram_read_s16(rdram, rdram_addr + 0);
+            dry_gain       = rdram_read_s16(rdram, rdram_addr + 2);
+            ramp_target[0] = (int64_t)rdram_read_s16(rdram, rdram_addr + 4) << 16;
+            ramp_target[1] = (int64_t)rdram_read_s16(rdram, rdram_addr + 6) << 16;
+            ramp_step[0]   = (int64_t)rdram_read_s32(rdram, rdram_addr + 8);
+            ramp_step[1]   = (int64_t)rdram_read_s32(rdram, rdram_addr + 12);
+            ramp_val[0]    = (int64_t)rdram_read_s32(rdram, rdram_addr + 16);
+            ramp_val[1]    = (int64_t)rdram_read_s32(rdram, rdram_addr + 20);
+        }
+
+        // Process each sample (mupen64plus alist_envmix_lin pattern)
+        for (uint16_t i = 0; i < num_samples; i++) {
+            // Ramp step FIRST, then use (matches mupen64plus ramp_step function)
+            for (int ch = 0; ch < 2; ch++) {
+                ramp_val[ch] += ramp_step[ch];
+                bool reached = (ramp_step[ch] <= 0)
+                    ? (ramp_val[ch] <= ramp_target[ch])
+                    : (ramp_val[ch] >= ramp_target[ch]);
+                if (reached) {
+                    ramp_val[ch] = ramp_target[ch];
+                    ramp_step[ch] = 0;  // Stop ramping (critical for state save)
+                }
+            }
+
+            int16_t vol_l = (int16_t)(ramp_val[0] >> 16);
+            int16_t vol_r = (int16_t)(ramp_val[1] >> 16);
+
+            // Combined gain = clamp(vol * dry_or_wet + 0x4000) >> 15 (mupen64plus)
+            int16_t gain_dl = clamp16(((int32_t)vol_l * (int32_t)dry_gain + 0x4000) >> 15);
+            int16_t gain_dr = clamp16(((int32_t)vol_r * (int32_t)dry_gain + 0x4000) >> 15);
+            int16_t gain_wl = clamp16(((int32_t)vol_l * (int32_t)wet_gain + 0x4000) >> 15);
+            int16_t gain_wr = clamp16(((int32_t)vol_r * (int32_t)wet_gain + 0x4000) >> 15);
+
+            // Read mono input sample
+            int16_t in_sample = dmem_read_s16(in_addr + i * 2);
+
+            // Mix into output buffers: dst = clamp(dst + (src * gain) >> 15)
+            int16_t cur;
+            cur = dmem_read_s16(dl_addr + i * 2);
+            dmem_write_s16(dl_addr + i * 2, clamp16((int32_t)cur + (((int32_t)in_sample * (int32_t)gain_dl) >> 15)));
+            cur = dmem_read_s16(dr_addr + i * 2);
+            dmem_write_s16(dr_addr + i * 2, clamp16((int32_t)cur + (((int32_t)in_sample * (int32_t)gain_dr) >> 15)));
+
+            if (has_aux) {
+                cur = dmem_read_s16(wl_addr + i * 2);
+                dmem_write_s16(wl_addr + i * 2, clamp16((int32_t)cur + (((int32_t)in_sample * (int32_t)gain_wl) >> 15)));
+                cur = dmem_read_s16(wr_addr + i * 2);
+                dmem_write_s16(wr_addr + i * 2, clamp16((int32_t)cur + (((int32_t)in_sample * (int32_t)gain_wr) >> 15)));
+            }
+        }
+
+        // Save state back to RDRAM (must match load format above)
+        rdram_write_s16(rdram, rdram_addr + 0,  wet_gain);
+        rdram_write_s16(rdram, rdram_addr + 2,  dry_gain);
+        rdram_write_s16(rdram, rdram_addr + 4,  (int16_t)(ramp_target[0] >> 16));
+        rdram_write_s16(rdram, rdram_addr + 6,  (int16_t)(ramp_target[1] >> 16));
+        rdram_write_s32(rdram, rdram_addr + 8,  (int32_t)ramp_step[0]);
+        rdram_write_s32(rdram, rdram_addr + 12, (int32_t)ramp_step[1]);
+        rdram_write_s32(rdram, rdram_addr + 16, (int32_t)ramp_val[0]);
+        rdram_write_s32(rdram, rdram_addr + 20, (int32_t)ramp_val[1]);
+        // Clear remaining bytes (24-79)
+        for (int i = 24; i < 80; i++) rdram[(rdram_addr + i) ^ 3] = 0;
+
+        static int envmixer_hle_log = 0;
+        envmixer_hle_log++;
+        if (envmixer_hle_log <= 20) {
+            int dl_nz = 0, dr_nz = 0, in_nz = 0;
+            for (uint16_t j = 0; j < num_samples && j < 32; j++) {
+                if (dmem_read_s16(dl_addr + j * 2) != 0) dl_nz++;
+                if (dmem_read_s16(dr_addr + j * 2) != 0) dr_nz++;
+                if (dmem_read_s16(in_addr + j * 2) != 0) in_nz++;
+            }
+            fprintf(stderr, "[ASP-HLE] ENVMIXER #%d: init=%d aux=%d samples=%u in=0x%03X vol=[%d,%d] tgt=[%d,%d] step=[%d,%d] dry=%d wet=%d in_nz=%d dl=%d dr=%d (t%d)\n",
+                    envmixer_hle_log, is_init, has_aux, num_samples, in_addr,
+                    (int16_t)(ramp_val[0] >> 16), (int16_t)(ramp_val[1] >> 16),
+                    (int16_t)(ramp_target[0] >> 16), (int16_t)(ramp_target[1] >> 16),
+                    (int32_t)ramp_step[0], (int32_t)ramp_step[1],
+                    dry_gain, wet_gain, in_nz, dl_nz, dr_nz, asp_task_id);
+            fflush(stderr);
+        }
+
         goto L_1098;
     }
     r2 = expected_dispatch[r1 / 2];
@@ -365,6 +929,15 @@ L_10B8:
     // ori         $1, $zero, 0x4000
     r1 = 0 | 0X4000;
     // mtc0        $1, SP_STATUS
+    // Print opcode histogram for tasks 89-95
+    if (asp_task_id >= 89 && asp_task_id <= 110) {
+        fprintf(stderr, "[ASP] t%d hist (%d cmds, sz=%d):", asp_task_id, asp_cmd_count, (int)saved_data_size);
+        for (int i = 0; i < 16; i++) {
+            if (op_hist[i] > 0) fprintf(stderr, " op%d=%d", i, op_hist[i]);
+        }
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
     // break       0
     return RspExitReason::Broke;
 L_10D4:
@@ -1676,6 +2249,15 @@ L_184C:
     // from DMEM parameters and loads resampler state from DRAM.
     // We add a label so L_18D4 can jump here.
 L_RESAMPLE_SETUP:
+    {
+        static int resample_trace = 0;
+        resample_trace++;
+        if (resample_trace <= 30) {
+            fprintf(stderr, "[R10-TRACE] RESAMPLE_SETUP #%d: r10=%d r7=0x%X w0=0x%08X (t%d cmd#%d)\n",
+                    resample_trace, r10, r7, r26, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
     // lh          $8, 0x0($24)
     r8 = RSP_MEM_H_LOAD(0X0, r24);
     // lh          $19, 0x2($24)
@@ -1778,6 +2360,15 @@ L_18D4:
     // After setup, control flows through L_18B8 → L_18D0 → L_18D4_BODY (not back here).
     goto L_RESAMPLE_SETUP;
 L_18D4_BODY:
+    {
+        static int body_trace = 0;
+        body_trace++;
+        if (body_trace <= 30) {
+            fprintf(stderr, "[R10-TRACE] L_18D4_BODY #%d: r10=%d r7=0x%X r22=0x%X (t%d cmd#%d)\n",
+                    body_trace, r10, r7, r22, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
     // Original handler body: clear state, check bit 1 of r7 for state restore
     // vxor        $v16, $v16, $v16
     rsp.VXOR<0>(rsp.vpu.r[16], rsp.vpu.r[16], rsp.vpu.r[16]);
@@ -1824,6 +2415,15 @@ L_18FC:
     r10 = RSP_ADD32(0, 0X40);
     // mtc2        $10, $v18[10]
     rsp.MTC2<10>(r10, rsp.vpu.r[18]);
+    {
+        static int r10set_trace = 0;
+        r10set_trace++;
+        if (r10set_trace <= 10) {
+            fprintf(stderr, "[R10-TRACE] r10 SET TO 0x40 #%d (t%d cmd#%d)\n",
+                    r10set_trace, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
     // addi        $9, $zero, 0x50
     r9 = RSP_ADD32(0, 0X50);
     // lqv         $v31[0], 0x10($9)
@@ -2230,6 +2830,15 @@ L_1BB0:
     // addi        $15, $zero, 0x0
     r15 = RSP_ADD32(0, 0X0);
 L_1BEC:
+    {
+        static int envcheck_trace = 0;
+        envcheck_trace++;
+        if (envcheck_trace <= 30) {
+            fprintf(stderr, "[R10-TRACE] L_1BEC ENVMIXER check #%d: r10=%d r12=0x%X r9=%d L=0x%03X R=0x%03X auxA=0x%03X auxC=0x%03X r17=0x%03X r13=0x%03X r19=0x%03X (t%d cmd#%d)\n",
+                    envcheck_trace, r10, r12, r9, r13, r19, r18, r17, r17, r13, r19, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
     // beq         $10, $zero, L_1CC8
     if (r10 == 0) {
         // lqv         $v30[0], 0x70($11)

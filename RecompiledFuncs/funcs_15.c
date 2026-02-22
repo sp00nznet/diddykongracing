@@ -1,5 +1,7 @@
 #include "recomp.h"
 #include "funcs.h"
+#include <stdio.h>
+static int _syn_start_params_calls = 0;
 
 RECOMP_FUNC void __CSPPostNextSeqEvent(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -8773,6 +8775,18 @@ L_80065E70:
 RECOMP_FUNC void alSynStartVoiceParams(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
+    _syn_start_params_calls++;
+    if (_syn_start_params_calls <= 30 || (_syn_start_params_calls % 200) == 0) {
+        gpr wt = ctx->r6;
+        int32_t wt_ptr = (int32_t)wt;
+        int32_t wbase = 0, wlen = 0;
+        uint8_t wtype = 0;
+        if (wt_ptr != 0) { wbase = MEM_W(0x00, wt); wlen = MEM_W(0x04, wt); wtype = MEM_BU(0x08, wt); }
+        int32_t pv = MEM_W(0x08, ctx->r5);
+        fprintf(stderr, "[SYN-PARAMS #%d] synth=0x%08X voice=0x%08X(pv=0x%08X) wt=0x%08X base=0x%08X len=%d type=%d\n",
+            _syn_start_params_calls, (int32_t)ctx->r4, (int32_t)ctx->r5, pv, wt_ptr, wbase, wlen, wtype);
+        fflush(stderr);
+    }
     // 0x80065E78: addiu       $sp, $sp, -0x20
     ctx->r29 = ADD32(ctx->r29, -0X20);
     // 0x80065E7C: sw          $ra, 0x14($sp)

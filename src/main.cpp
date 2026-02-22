@@ -100,18 +100,19 @@ void queue_audio_samples(int16_t* samples, size_t num_samples) {
     SDL_QueueAudio(audio_device, fixed.data(), (Uint32)(num_samples * sizeof(int16_t)));
 
     audio_queue_count++;
-    if (audio_queue_count <= 10) {
-        // Scan for non-zero samples in both raw and fixed buffers
-        int raw_nonzero = 0, fixed_nonzero = 0;
-        int16_t raw_max = 0, fixed_max = 0;
+    {
+        // Scan for non-zero samples in fixed buffer
+        int fixed_nonzero = 0;
+        int16_t fixed_max = 0;
         for (size_t s = 0; s < num_samples; s++) {
-            if (samples[s] != 0) { raw_nonzero++; if (abs(samples[s]) > abs(raw_max)) raw_max = samples[s]; }
             if (fixed[s] != 0) { fixed_nonzero++; if (abs(fixed[s]) > abs(fixed_max)) fixed_max = fixed[s]; }
         }
-        fprintf(stderr, "[DKR-AUDIO] Queued %zu samples (call #%d), queued_bytes=%u, raw_nz=%d raw_max=%d fix_nz=%d fix_max=%d\n",
-                num_samples, audio_queue_count, SDL_GetQueuedAudioSize(audio_device),
-                raw_nonzero, (int)raw_max, fixed_nonzero, (int)fixed_max);
-        fflush(stderr);
+        if (audio_queue_count <= 10 || fixed_nonzero > 0) {
+            fprintf(stderr, "[DKR-AUDIO] Queued %zu samples (call #%d), queued_bytes=%u, fix_nz=%d fix_max=%d\n",
+                    num_samples, audio_queue_count, SDL_GetQueuedAudioSize(audio_device),
+                    fixed_nonzero, (int)fixed_max);
+            fflush(stderr);
+        }
     }
 }
 
