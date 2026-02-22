@@ -49,6 +49,7 @@ add_executable(DKRRecompiled
     src/rt64_render_context.cpp
     src/f3ddkr.cpp
     src/stubs.cpp
+    src/audio_diag.cpp
     rsp/aspMain.cpp
 )
 

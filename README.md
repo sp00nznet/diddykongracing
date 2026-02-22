@@ -2,17 +2,17 @@
 
 Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
-![Title Screen](screenshots/game_06.png)
+![Title Screen](screenshots/game_05.png)
 
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Stable, no crashes
+- **Runtime**: Stable — boots to title screen and menus
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
-- **Input**: Keyboard and gamepad supported (SDL2 GameController API)
-- **Audio**: aspMain RSP microcode processing continuously; SDL2 audio output wired up
+- **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
+- **Audio**: Full HLE audio pipeline — aspMain RSP processing with SDL2 stereo output at 22050 Hz
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline
@@ -27,15 +27,15 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - **Fill rect**: Fill/1-cycle/2-cycle modes
 
 ### Audio Pipeline
-- **aspMain**: Recompiled RSP audio microcode (MIPS → C++)
-- **SAVEBUFF/LOADBUFF HLE**: Intercepted broken DMA handlers at dispatch level
-  - dispatch[6] (A_SAVEBUFF) acted as SETBUFF instead of performing DMA write
-  - dispatch[4] (A_LOADBUFF) used hardcoded DMEM address and wrong RDRAM source
-  - Both now read params from DMEM and perform direct byte copy with bounds checking
-- **Resampler**: Fixed infinite loop in op=5 handler (setup/body label split)
+- **aspMain HLE**: Recompiled RSP audio microcode (MIPS to C++) with HLE intercepts for broken dispatch handlers
+- **SETVOL HLE**: Full DKR-specific 5-command envelope setup (vol, target, rate, dry/wet)
+- **ENVMIXER HLE**: Linear envelope mixer with per-sample volume ramping, combined gain computation (vol * dry/wet with rounding), and self-consistent 80-byte state save/restore for voice continuation
+- **MIXER HLE**: VMULF/VMACF accumulation (dispatch[12] enters at loop body, skipping all setup)
+- **INTERLEAVE HLE**: Stereo L/R channel interleaving to output buffer
+- **SAVEBUFF/LOADBUFF HLE**: DMA handlers intercepted — dispatch[6] acted as SETBUFF, dispatch[4] used wrong addresses. Both now use SETBUFF params with bounds-checked byte copy.
+- **RESAMPLE**: Fixed infinite loop in op=5 handler (setup/body label split)
 - **Scheduler**: Fixed SI message requeue starvation that blocked SP/DP/VI delivery
-- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS, byte-order corrected)
-- **Status**: Audio tasks process without crashes; investigating silent output (processing pipeline produces zeros)
+- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS, stereo, byte-order corrected)
 
 ### Controls
 | Key | N64 Button | | Key | N64 Button |
@@ -45,7 +45,12 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 | Z | Z Trigger | | I/K/J/L | C-Up/Down/Left/Right |
 | Escape | Start | | Arrows | D-Pad |
 
-SDL GameController (Xbox-style) gamepads are also supported.
+Xbox-style gamepads are also supported:
+| Gamepad | N64 Button | | Gamepad | N64 Button |
+|---------|------------|-|---------|------------|
+| A | A | | Left Trigger | Z Trigger |
+| X | B | | Right Trigger | R Trigger |
+| Start | Start | | Left Stick | Analog Stick |
 
 ## Building
 
@@ -93,22 +98,23 @@ tracking/
   include/
     f3ddkr.h              # f3ddkr microcode definitions and state
   src/
-    main.cpp              # Entry point, SDL init, input, game lifecycle
+    main.cpp              # Entry point, SDL init, input, audio, game lifecycle
     rt64_render_context.cpp  # Software renderer + f3ddkr HLE bridge
     f3ddkr.cpp            # f3ddkr HLE implementation
     stubs.cpp             # Stub functions for unresolved symbols
     register_overlays.cpp # Overlay registration (none for DKR)
   rsp/
-    aspMain.cpp           # aspMain audio RSP microcode HLE
+    aspMain.cpp           # aspMain audio RSP microcode HLE (SETVOL, ENVMIXER, MIXER, etc.)
   lib/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```
 
 ## Known Issues
 
-1. **Audio output silent**: aspMain processes tasks and SAVEBUFF/LOADBUFF DMA works, but audio processing handlers (ADPCM, ENVMIXER, RESAMPLE, INTERLEAVE) produce zero output
-2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
+1. **Audio quality**: Audio pipeline produces output on both channels, but some voices have sparse data due to ADPCM decode not activating for all voice slots
+2. **Menu navigation crash**: Selecting menu items can cause visual corruption and crash
+3. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
+4. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
 
 ## Credits
 
