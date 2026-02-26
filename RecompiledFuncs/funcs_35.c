@@ -4661,7 +4661,7 @@ RECOMP_FUNC void alLoadParam(uint8_t* rdram, recomp_context* ctx) {
     _load_param_calls++;
     {
         int32_t paramID = (int32_t)ctx->r5;
-        if (paramID == 5 && _load_param_calls <= 100) { // AL_FILTER_SET_WAVETABLE
+        if (paramID == 5 && _load_param_calls <= 3) { // AL_FILTER_SET_WAVETABLE
             gpr wt = ctx->r6;
             int32_t wt_ptr = (int32_t)wt;
             int32_t wbase = 0, wlen = 0;
@@ -4677,7 +4677,7 @@ RECOMP_FUNC void alLoadParam(uint8_t* rdram, recomp_context* ctx) {
             fprintf(stderr, "[LOADPARAM SET_WT #%d] filter=0x%08X wt=0x%08X base=0x%08X len=%d type=%d loop=0x%08X book=0x%08X\n",
                 _load_param_calls, (int32_t)ctx->r4, wt_ptr, wbase, wlen, wtype, wloop, wbook);
             fflush(stderr);
-        } else if (paramID == 4 && _load_param_calls <= 50) { // AL_FILTER_RESET
+        } else if (paramID == 4 && _load_param_calls <= 3) { // AL_FILTER_RESET
             fprintf(stderr, "[LOADPARAM RESET #%d] filter=0x%08X\n", _load_param_calls, (int32_t)ctx->r4);
             fflush(stderr);
         }
@@ -5793,7 +5793,7 @@ RECOMP_FUNC void alAdpcmPull(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     _adpcm_pull_calls++;
-    if (_adpcm_pull_calls <= 30 || (_adpcm_pull_calls % 500) == 0) {
+    if (_adpcm_pull_calls <= 3 || (_adpcm_pull_calls % 2000) == 0) {
         // a0=filter, a2=outCount
         gpr filt = ctx->r4;
         int32_t outCount = (int32_t)ctx->r6;

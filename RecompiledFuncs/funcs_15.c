@@ -8776,7 +8776,7 @@ RECOMP_FUNC void alSynStartVoiceParams(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     _syn_start_params_calls++;
-    if (_syn_start_params_calls <= 30 || (_syn_start_params_calls % 200) == 0) {
+    if (_syn_start_params_calls <= 3 || (_syn_start_params_calls % 2000) == 0) {
         gpr wt = ctx->r6;
         int32_t wt_ptr = (int32_t)wt;
         int32_t wbase = 0, wlen = 0;

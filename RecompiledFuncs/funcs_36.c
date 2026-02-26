@@ -4149,7 +4149,7 @@ RECOMP_FUNC void static_0_800CC020(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     _decode_chunk_calls++;
-    if (_decode_chunk_calls <= 30 || (_decode_chunk_calls % 500) == 0) {
+    if (_decode_chunk_calls <= 3 || (_decode_chunk_calls % 2000) == 0) {
         extern
 #ifdef __cplusplus
         "C"
@@ -4325,7 +4325,7 @@ L_800CC0D8:
     // 0x800CC130: sw          $t7, 0x4($a0)
     MEM_W(0X4, ctx->r4) = ctx->r15;
     // [DIAG] Verify ADPCM command was written correctly
-    if (_decode_chunk_calls <= 30) {
+    if (_decode_chunk_calls <= 3) {
         int32_t adpcm_addr = (int32_t)ctx->r4;
         int32_t adpcm_w0 = MEM_W(0x0, ctx->r4);
         int32_t adpcm_w1 = MEM_W(0x4, ctx->r4);

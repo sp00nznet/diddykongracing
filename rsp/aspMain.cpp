@@ -5,6 +5,7 @@
 static int asp_cmd_count = 0;
 static int asp_task_id = 0;
 static int asp_adpcm_cmd_count = 0;
+static int asp_last_opcode = -1;  // track which opcode dispatched
 extern "C" int g_asp_task_id = 0; // global, readable from other files
 
 // [PATCH] HLE intercepts for broken audio commands.
@@ -211,10 +212,17 @@ RspExitReason aspMain(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {
     r28 = RSP_MEM_W_LOAD(0X30, r1);
     // lw          $27, 0x34($1)
     r27 = RSP_MEM_W_LOAD(0X34, r1);
+    // [PATCH] Skip null tasks — DKR submits every 3rd audio task with data_size=0.
+    // Without this check, L_10D4 computes DMA length r3=-1 (0xFFFFFFFF) which
+    // loads 1MB of garbage into DMEM. On real N64, the DMA hardware handles
+    // zero-length gracefully, but our recompiled code doesn't.
+    if (RSP_SIGNED(r27) <= 0) {
+        return RspExitReason::Broke;
+    }
     static uint32_t saved_data_size = 0;
     saved_data_size = r27;
     // Diagnostic: log ucode_data_size, dispatch table, and ENVMIXER params
-    if (asp_task_id <= 3 || (asp_task_id >= 91 && asp_task_id <= 92)) {
+    if (asp_task_id <= 1) {
         uint32_t udata_sz = RSP_MEM_W_LOAD(0x1C, 0xFC0);  // task->t.ucode_data_size from DMEM
         uint16_t p0 = RSP_MEM_HU_LOAD(0x0, r24);  // params[0] (L output addr)
         uint16_t p2 = RSP_MEM_HU_LOAD(0x2, r24);  // params[2] (R output addr)
@@ -320,18 +328,10 @@ L_1064:
     r1 = r1 & 0XFE;
     // [DEBUG] Trace command dispatch
     asp_cmd_count++;
+    asp_last_opcode = r1 / 2;
     if (r1/2 < 16) op_hist[r1/2]++;
     // Dump commands around the first voice (incl. SETBUFF/SAVEBUFF/RESAMPLE/ENVMIXER)
-    if (asp_task_id == 91 && asp_cmd_count <= 30) {
-        uint16_t p0  = RSP_MEM_HU_LOAD(0x0, r24);
-        uint16_t p2  = RSP_MEM_HU_LOAD(0x2, r24);
-        uint16_t p10 = RSP_MEM_HU_LOAD(0x10, r24);
-        uint16_t p12 = RSP_MEM_HU_LOAD(0x12, r24);
-        uint16_t p14 = RSP_MEM_HU_LOAD(0x14, r24);
-        fprintf(stderr, "[ASP] t91 cmd#%d: op=%d w0=0x%08X w1=0x%08X  p[0]=0x%03X p[2]=0x%03X p[10]=0x%03X p[12]=0x%03X p[14]=0x%03X\n",
-                asp_cmd_count, r1/2, r26, r25, p0, p2, p10, p12, p14);
-        fflush(stderr);
-    }
+    // t91 command dump removed (no longer needed)
     // addi        $28, $28, 0x8
     r28 = RSP_ADD32(r28, 0X8);
     // addi        $27, $27, -0x8
@@ -350,24 +350,77 @@ L_1064:
     // recomp we re-read it for every command. The table never changes, so use
     // the known-good static copy.
     if ((r1 / 2) >= 16) {
-        fprintf(stderr, "[ASP] Bad opcode: r1=%u (op=%u) w0=0x%08X w1=0x%08X task#%d cmd#%d r29=0x%X r30=%d\n",
-                r1, r1/2, r26, r25, asp_task_id, asp_cmd_count, r29, (int32_t)r30);
-        fflush(stderr);
-        return RspExitReason::Broke;
-    }
-    if ((r1 / 2) == 1) {
-        asp_adpcm_cmd_count++;
-        if (asp_adpcm_cmd_count <= 5) {
-            fprintf(stderr, "[ASP] ADPCM cmd! t%d cmd#%d total_adpcm=%d w0=0x%08X w1=0x%08X\n",
-                    asp_task_id, asp_cmd_count, asp_adpcm_cmd_count, r26, r25);
+        // [PATCH] Treat unknown opcodes as SPNOOP (skip to next command).
+        // On real N64, unused command buffer space is zeroed (SPNOOP = op 0).
+        // In our recomp, the game's command buffer may contain uninitialized
+        // data (0xFFFFFFFF, etc.) past the last valid command. Instead of
+        // aborting the entire task, just skip the garbage command. The task
+        // will exit normally when r27 (remaining data_size) reaches 0.
+        static int bad_op_log = 0;
+        bad_op_log++;
+        if (bad_op_log <= 5) {
+            fprintf(stderr, "[ASP] Unknown opcode (skipped): r1=%u (op=%u) w0=0x%08X w1=0x%08X task#%d cmd#%d r29=0x%X r30=%d\n",
+                    r1, r1/2, r26, r25, asp_task_id, asp_cmd_count, r29, (int32_t)r30);
             fflush(stderr);
         }
+        goto L_1098;
+    }
+    if ((r1 / 2) == 1) {
+        // A_ADPCM: dispatch[1]=L_14A4 is broken — it enters the ADPCM decode loop
+        // body without any register setup. L_1428 is the correct entry point that:
+        //   - Reads params[0,2,4] for input DMEM, output DMEM, and byte count
+        //   - Resolves w1 via segment table for the RDRAM state address
+        //   - Zeroes output buffer and decoder vector registers
+        //   - Checks A_INIT/A_LOOP flags for proper state initialization
+        //   - Then enters the ADPCM decode loop
+        // Fix: reload v31 constants and jump to L_1428.
+        static int adpcm_hle_log = 0;
+        adpcm_hle_log++;
+        if (adpcm_hle_log <= 3) {
+            uint8_t flags = (U32(r26) >> 16) & 0xFF;
+            uint16_t p0 = RSP_MEM_HU_LOAD(0x0, r24);
+            uint16_t p2 = RSP_MEM_HU_LOAD(0x2, r24);
+            uint16_t p4 = RSP_MEM_HU_LOAD(0x4, r24);
+            fprintf(stderr, "[ASP-HLE] ADPCM #%d: w0=0x%08X w1=0x%08X flags=0x%02X params[0]=0x%03X [2]=0x%03X [4]=%u (t%d cmd#%d)\n",
+                    adpcm_hle_log, r26, r25, flags, p0, p2, p4, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+        // Load v31 constant vector from DMEM[0x00] (needed by decode loop)
+        rsp.LQV<0>(rsp.vpu.r[31], 0, 0X0);
+        goto L_1428;
+    }
+    if ((r1 / 2) == 10) {
+        // A_DMEMMOVE: Copy data within DMEM.
+        // dispatch[10]=L_1428 is the ADPCM/POLEF SETUP code -- completely wrong
+        // for DMEMMOVE. When DMEMMOVE commands dispatch to L_1428, the w1 value
+        // (which encodes DMEM dst/count) gets misinterpreted as a segmented RDRAM
+        // address, causing bogus ADPCM decode with out-of-range DMA addresses.
+        // HLE: straightforward DMEM-to-DMEM copy.
+        // Encoding (naudio_dk): w0[15:0]=src, w1[31:16]=dst, w1[15:0]=count
+        // All offsets relative to audio base 0x5C0.
+        uint16_t src_off = r26 & 0xFFFF;
+        uint16_t dst_off = (U32(r25) >> 16) & 0xFFFF;
+        uint16_t count   = r25 & 0xFFFF;
+        uint32_t src_addr = (src_off + 0x5C0) & 0xFFF;
+        uint32_t dst_addr = (dst_off + 0x5C0) & 0xFFF;
+        // Copy byte-by-byte (source read before dest write, handles overlap)
+        for (uint16_t i = 0; i < count; i++) {
+            RSP_MEM_B(i, dst_addr) = RSP_MEM_BU(i, src_addr);
+        }
+        static int dmemmove_log = 0;
+        dmemmove_log++;
+        if (dmemmove_log <= 3) {
+            fprintf(stderr, "[ASP-HLE] DMEMMOVE #%d: src=0x%03X dst=0x%03X count=%u (t%d cmd#%d)\n",
+                    dmemmove_log, src_addr, dst_addr, count, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+        goto L_1098;
     }
     // Log ALL SETVOL (op=9) and ENVMIXER (op=3) commands
     if ((r1 / 2) == 9) {
         static int setvol_count = 0;
         setvol_count++;
-        if (setvol_count <= 20) {
+        if (setvol_count <= 3) {
             fprintf(stderr, "[ASP] SETVOL #%d: w0=0x%08X w1=0x%08X flags=0x%02X (t%d cmd#%d)\n",
                     setvol_count, r26, r25, (U32(r26) >> 16) & 0xFF, asp_task_id, asp_cmd_count);
             fflush(stderr);
@@ -376,13 +429,63 @@ L_1064:
     if ((r1 / 2) == 3) {
         static int envmixer_total = 0;
         envmixer_total++;
-        if (envmixer_total <= 20) {
+        if (envmixer_total <= 3) {
             uint8_t env_flags = (U32(r26) >> 16) & 0xFF;
             fprintf(stderr, "[ASP] ENVMIXER #%d: w0=0x%08X w1=0x%08X flags=0x%02X init=%d aux=%d (t%d cmd#%d)\n",
                     envmixer_total, r26, r25, env_flags, env_flags & 1, (env_flags >> 3) & 1,
                     asp_task_id, asp_cmd_count);
             fflush(stderr);
         }
+    }
+    if ((r1 / 2) == 7) {
+        // A_SEGMENT: Set segment table entry for segmented address resolution.
+        // dispatch[7]=L_12D4 is broken — just stores params[0x06], doesn't update
+        // the segment table at DMEM[0x320]. The real segment code (~IMEM 0x1254)
+        // is unreachable dead code.
+        // HLE: write segment base to DMEM[0x320 + seg_idx*4].
+        // Encoding: w1[31:24] = segment index, w1[23:0] = physical RDRAM base.
+        uint32_t seg_idx = (U32(r25) >> 24) & 0xF;
+        uint32_t seg_val = r25 & 0x00FFFFFF;
+        RSP_MEM_W_STORE(0x320, seg_idx * 4, seg_val);
+        // Also do native handler's work: params[0x06] = w0 low16
+        RSP_MEM_H_STORE(0X6, r24, r26);
+        static int segment_log = 0;
+        segment_log++;
+        if (segment_log <= 3) {
+            fprintf(stderr, "[ASP-HLE] SEGMENT #%d: seg[%d]=0x%06X (w1=0x%08X) (t%d cmd#%d)\n",
+                    segment_log, seg_idx, seg_val, r25, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+        goto L_1098;
+    }
+    if ((r1 / 2) == 11) {
+        // A_LOADADPCM: Load ADPCM codebook from RDRAM to DMEM[0x4C0].
+        // dispatch[11]=L_12A4 is broken — just stores params[0xC], no DMA.
+        // The codebook is needed by ADPCM decode (indexed at DMEM[0x4C0 + pred*32]).
+        // HLE: resolve segmented RDRAM address, DMA codebook bytes to DMEM.
+        uint16_t count = RSP_MEM_HU_LOAD(0x14, r24);  // byte count from SETBUFF
+        uint32_t seg_idx = (U32(r25) >> 24) & 0xF;
+        uint32_t seg_base = RSP_MEM_W_LOAD(0x320, seg_idx * 4);
+        uint32_t rdram_addr = (r25 & 0x00FFFFFF) + seg_base;
+        if (count > 0 && rdram_addr + count <= 0x800000) {
+            for (uint32_t i = 0; i < count; i++) {
+                RSP_MEM_B(i, 0x4C0) = rdram[(rdram_addr + i) ^ 3];
+            }
+        }
+        // Also do native handler's work: params[0xC] = w0 low16
+        RSP_MEM_H_STORE(0XC, r24, r26);
+        static int loadadpcm_log = 0;
+        loadadpcm_log++;
+        if (loadadpcm_log <= 3) {
+            int nz = 0;
+            for (uint32_t i = 0; i < count && i < 64; i++) {
+                if (RSP_MEM_BU(i, 0x4C0) != 0) nz++;
+            }
+            fprintf(stderr, "[ASP-HLE] LOADADPCM #%d: rdram=0x%06X count=%u seg[%d]=0x%06X nz=%d (t%d cmd#%d)\n",
+                    loadadpcm_log, rdram_addr, count, seg_idx, seg_base, nz, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+        goto L_1098;
     }
     // [PATCH] HLE intercepts for broken audio command handlers.
     // Uses naudio_dk encoding per mupen64plus: w0[11:0]=dmem, w0[23:12]=count,
@@ -406,7 +509,7 @@ L_1064:
         }
         static int clearbuff_log = 0;
         clearbuff_log++;
-        if (clearbuff_log <= 40) {
+        if (clearbuff_log <= 3) {
             fprintf(stderr, "[ASP] CLEARBUFF #%d: off=0x%03X dmem=0x%03X count=%u (t%d cmd#%d)\n",
                     clearbuff_log, dmem_off, dmem_addr, count, asp_task_id, asp_cmd_count);
             fflush(stderr);
@@ -440,7 +543,7 @@ L_1064:
             }
         }
 
-        if (loadbuff_count <= 20) {
+        if (loadbuff_count <= 3) {
             int rdram_nz = 0, dmem_nz = 0;
             for (uint32_t i = 0; i < byte_count && i < 64; i++) {
                 if (rdram[(rdram_src + i) ^ 3] != 0) rdram_nz++;
@@ -495,8 +598,8 @@ L_1064:
             }
         }
 
-        // Log: first 20, after INTERLEAVE, or writes to AI DAC range (0x3F????)
-        if (savebuff_count <= 20 || did_interleave || rdram_dst >= 0x3F0000) {
+        // Log: first 20 only (POST-INTLV and AI-BUF were useful for debugging, now capped)
+        if (savebuff_count <= 3) {
             int nz = 0;
             for (uint32_t i = 0; i < byte_count && i < 64; i++) {
                 if (RSP_MEM_BU(i, dmem_src) != 0) nz++;
@@ -556,7 +659,7 @@ L_1064:
 
         static int mixer_log = 0;
         mixer_log++;
-        if (mixer_log <= 30) {
+        if (mixer_log <= 3) {
             int src_nz = 0, dst_nz = 0;
             for (uint32_t i = 0; i < byte_count && i < 32; i++) {
                 if (RSP_MEM_BU(i, src_addr) != 0) src_nz++;
@@ -623,7 +726,7 @@ L_1064:
 
         static int interleave_count = 0;
         interleave_count++;
-        if (asp_task_id >= 89 && interleave_count <= 100) {
+        if (asp_task_id >= 89 && interleave_count <= 3) {
             int nz = 0;
             for (uint32_t i = 0; i < count * 2 && i < 640; i++) {
                 if (RSP_MEM_BU(i, out_addr) != 0) nz++;
@@ -712,7 +815,7 @@ L_1064:
 
         static int setvol_hle_log = 0;
         setvol_hle_log++;
-        if (setvol_hle_log <= 30) {
+        if (setvol_hle_log <= 3) {
             fprintf(stderr, "[ASP-HLE] SETVOL #%d: flags=0x%02X w0=0x%08X w1=0x%08X → vol=[%d,%d] tgt=[%d,%d] rate=[%d,%d] dry=%d wet=%d (t%d)\n",
                     setvol_hle_log, sv_flags, r26, r25,
                     naudio_state.vol[0], naudio_state.vol[1],
@@ -854,7 +957,7 @@ L_1064:
 
         static int envmixer_hle_log = 0;
         envmixer_hle_log++;
-        if (envmixer_hle_log <= 20) {
+        if (envmixer_hle_log <= 3) {
             int dl_nz = 0, dr_nz = 0, in_nz = 0;
             for (uint16_t j = 0; j < num_samples && j < 32; j++) {
                 if (dmem_read_s16(dl_addr + j * 2) != 0) dl_nz++;
@@ -929,13 +1032,13 @@ L_10B8:
     // ori         $1, $zero, 0x4000
     r1 = 0 | 0X4000;
     // mtc0        $1, SP_STATUS
-    // Print opcode histogram for tasks 89-95
-    if (asp_task_id >= 89 && asp_task_id <= 110) {
-        fprintf(stderr, "[ASP] t%d hist (%d cmds, sz=%d):", asp_task_id, asp_cmd_count, (int)saved_data_size);
+    // Print opcode histogram (first 10 tasks, then every 100th)
+    if (asp_task_id <= 10 || (asp_task_id % 100) == 0) {
+        fprintf(stderr, "[ASP] t%d END hist:", asp_task_id);
         for (int i = 0; i < 16; i++) {
             if (op_hist[i] > 0) fprintf(stderr, " op%d=%d", i, op_hist[i]);
         }
-        fprintf(stderr, "\n");
+        fprintf(stderr, " (%d cmds)\n", asp_cmd_count);
         fflush(stderr);
     }
     // break       0
@@ -1017,11 +1120,7 @@ L_1118:
     SET_DMA_MEM(r1);
     // mtc0        $2, SP_DRAM_ADDR
     SET_DMA_DRAM(r2);
-    // [DEBUG] Trace DMA reads
-    if (asp_cmd_count < 50) {
-        fprintf(stderr, "[ASP] DMA_READ: dmem=0x%03X dram=0x%08X len=0x%X\n", r1, r2, r3);
-        fflush(stderr);
-    }
+    // DMA read trace (disabled — audio pipeline confirmed working)
     // mtc0        $3, SP_RD_LEN
     // [PATCH] Use custom multi-row DMA that properly handles the full SP_RD_LEN
     // register format (length/count/skip) and DMEM address wrapping.
@@ -1055,11 +1154,7 @@ L_1144:
     SET_DMA_MEM(r1);
     // mtc0        $2, SP_DRAM_ADDR
     SET_DMA_DRAM(r2);
-    // [DEBUG] Trace DMA writes
-    if (asp_cmd_count < 50) {
-        fprintf(stderr, "[ASP] DMA_WRITE: dmem=0x%03X dram=0x%08X len=0x%X\n", r1, r2, r3);
-        fflush(stderr);
-    }
+    // DMA write trace (disabled — audio pipeline confirmed working)
     // mtc0        $3, SP_WR_LEN
     // [PATCH] Use custom multi-row DMA for writes too.
     asp_dma_dmem_to_rdram(rdram, dma_mem_address, dma_dram_address, r3);
@@ -1124,7 +1219,7 @@ L_1194:
         uint32_t total_dmem_bytes = first_row_len * dma_count;
         bool dma_wraps = ((r1 & 0xFFF) + total_dmem_bytes) > 0x1000;
 
-        if (asp_task_id <= 3) {
+        if (asp_task_id <= 1) {
             fprintf(stderr, "[ASP] L_1194 DMA: dmem=0x%03X dram=0x%08X len=%d count=%d skip=%d total=%d wraps=%d r31=0x%04X\n",
                 r1, r2, first_row_len, dma_count, dma_skip, total_dmem_bytes, dma_wraps, r31);
             fflush(stderr);
@@ -1673,6 +1768,18 @@ L_1480:
     // lw          $2, 0x10($24)
     r2 = RSP_MEM_W_LOAD(0X10, r24);
 L_14A4:
+    {
+        static int adpcm_dma_trace = 0;
+        adpcm_dma_trace++;
+        if (adpcm_dma_trace <= 3) {
+            fprintf(stderr, "[ADPCM-DMA #%d] r2(rdram)=0x%08X r19=0x%04X r17=0x%08X r18=%d FROM_OP=%d (t%d cmd#%d)\n",
+                    adpcm_dma_trace, r2, r19, r17, (int32_t)r18, asp_last_opcode, asp_task_id, asp_cmd_count);
+            if (r2 > 0x800000) {
+                fprintf(stderr, "[ADPCM-DMA] WARNING: RDRAM addr 0x%08X is out of range!\n", r2);
+            }
+            fflush(stderr);
+        }
+    }
     // addi        $1, $19, 0x0
     r1 = RSP_ADD32(r19, 0X0);
     // jal         0x1194
@@ -1683,6 +1790,26 @@ L_14A4:
     // addi        $3, $zero, 0x1F
     r3 = RSP_ADD32(0, 0X1F);
 L_14B0:
+    {
+        static int post_dma_trace = 0;
+        post_dma_trace++;
+        if (post_dma_trace <= 3) {
+            // Check what DMA loaded into DMEM at the output address (r19)
+            int nz = 0;
+            uint16_t out_addr = r19 & 0xFFF;
+            for (int i = 0; i < 32 && (out_addr + i) < 0x1000; i++) {
+                if (dmem[out_addr + i] != 0) nz++;
+            }
+            fprintf(stderr, "[ADPCM-POST-DMA #%d] dmem[0x%03X] first 16 bytes: %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X %02X%02X nz=%d (t%d cmd#%d)\n",
+                    post_dma_trace, out_addr,
+                    dmem[out_addr], dmem[out_addr+1], dmem[out_addr+2], dmem[out_addr+3],
+                    dmem[out_addr+4], dmem[out_addr+5], dmem[out_addr+6], dmem[out_addr+7],
+                    dmem[out_addr+8], dmem[out_addr+9], dmem[out_addr+10], dmem[out_addr+11],
+                    dmem[out_addr+12], dmem[out_addr+13], dmem[out_addr+14], dmem[out_addr+15],
+                    nz, asp_task_id, asp_cmd_count);
+            fflush(stderr);
+        }
+    }
     // mfc0        $5, SP_DMA_BUSY
     r5 = 0;
     // bne         $5, $zero, L_14B0
@@ -2252,9 +2379,14 @@ L_RESAMPLE_SETUP:
     {
         static int resample_trace = 0;
         resample_trace++;
-        if (resample_trace <= 30) {
-            fprintf(stderr, "[R10-TRACE] RESAMPLE_SETUP #%d: r10=%d r7=0x%X w0=0x%08X (t%d cmd#%d)\n",
-                    resample_trace, r10, r7, r26, asp_task_id, asp_cmd_count);
+        if (resample_trace <= 3) {
+            uint16_t p0  = RSP_MEM_HU_LOAD(0x0, r24);
+            uint16_t p2  = RSP_MEM_HU_LOAD(0x2, r24);
+            uint16_t p4  = RSP_MEM_HU_LOAD(0x4, r24);
+            fprintf(stderr, "[R10-TRACE] RESAMPLE_SETUP #%d: r10=%d r7=0x%X w0=0x%08X (t%d cmd#%d)\n"
+                    "  params: p[0]=0x%03X(in) p[2]=0x%03X(out) p[4]=%d(cnt)\n",
+                    resample_trace, r10, r7, r26, asp_task_id, asp_cmd_count,
+                    p0, p2, p4);
             fflush(stderr);
         }
     }
@@ -2363,7 +2495,7 @@ L_18D4_BODY:
     {
         static int body_trace = 0;
         body_trace++;
-        if (body_trace <= 30) {
+        if (body_trace <= 3) {
             fprintf(stderr, "[R10-TRACE] L_18D4_BODY #%d: r10=%d r7=0x%X r22=0x%X (t%d cmd#%d)\n",
                     body_trace, r10, r7, r22, asp_task_id, asp_cmd_count);
             fflush(stderr);
@@ -2418,7 +2550,7 @@ L_18FC:
     {
         static int r10set_trace = 0;
         r10set_trace++;
-        if (r10set_trace <= 10) {
+        if (r10set_trace <= 3) {
             fprintf(stderr, "[R10-TRACE] r10 SET TO 0x40 #%d (t%d cmd#%d)\n",
                     r10set_trace, asp_task_id, asp_cmd_count);
             fflush(stderr);
@@ -2833,7 +2965,7 @@ L_1BEC:
     {
         static int envcheck_trace = 0;
         envcheck_trace++;
-        if (envcheck_trace <= 30) {
+        if (envcheck_trace <= 3) {
             fprintf(stderr, "[R10-TRACE] L_1BEC ENVMIXER check #%d: r10=%d r12=0x%X r9=%d L=0x%03X R=0x%03X auxA=0x%03X auxC=0x%03X r17=0x%03X r13=0x%03X r19=0x%03X (t%d cmd#%d)\n",
                     envcheck_trace, r10, r12, r9, r13, r19, r18, r17, r17, r13, r19, asp_task_id, asp_cmd_count);
             fflush(stderr);

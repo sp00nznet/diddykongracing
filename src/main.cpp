@@ -107,7 +107,7 @@ void queue_audio_samples(int16_t* samples, size_t num_samples) {
         for (size_t s = 0; s < num_samples; s++) {
             if (fixed[s] != 0) { fixed_nonzero++; if (abs(fixed[s]) > abs(fixed_max)) fixed_max = fixed[s]; }
         }
-        if (audio_queue_count <= 10 || fixed_nonzero > 0) {
+        if (audio_queue_count <= 5 || (audio_queue_count % 100) == 0) {
             fprintf(stderr, "[DKR-AUDIO] Queued %zu samples (call #%d), queued_bytes=%u, fix_nz=%d fix_max=%d\n",
                     num_samples, audio_queue_count, SDL_GetQueuedAudioSize(audio_device),
                     fixed_nonzero, (int)fixed_max);

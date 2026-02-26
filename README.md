@@ -12,7 +12,7 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
 - **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
-- **Audio**: Full HLE audio pipeline — aspMain RSP processing with SDL2 stereo output at 22050 Hz
+- **Audio**: Full HLE audio pipeline — all 14 aspMain opcodes active, sustained full-scale stereo output at 22050 Hz
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline
@@ -28,12 +28,19 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 
 ### Audio Pipeline
 - **aspMain HLE**: Recompiled RSP audio microcode (MIPS to C++) with HLE intercepts for broken dispatch handlers
+- **ADPCM HLE**: Fixed dispatch[1]=L_14A4 which entered decode loop without register setup — redirects to L_1428 for proper param read, segment resolve, and state init
 - **SETVOL HLE**: Full DKR-specific 5-command envelope setup (vol, target, rate, dry/wet)
 - **ENVMIXER HLE**: Linear envelope mixer with per-sample volume ramping, combined gain computation (vol * dry/wet with rounding), and self-consistent 80-byte state save/restore for voice continuation
 - **MIXER HLE**: VMULF/VMACF accumulation (dispatch[12] enters at loop body, skipping all setup)
 - **INTERLEAVE HLE**: Stereo L/R channel interleaving to output buffer
 - **SAVEBUFF/LOADBUFF HLE**: DMA handlers intercepted — dispatch[6] acted as SETBUFF, dispatch[4] used wrong addresses. Both now use SETBUFF params with bounds-checked byte copy.
+- **DMEMMOVE HLE**: dispatch[10]=L_1428 was ADPCM setup, not a memory copy — now does proper DMEM-to-DMEM byte copy
+- **SEGMENT HLE**: Populates segment table at DMEM[0x320]
+- **LOADADPCM HLE**: DMA loads codebook from RDRAM to DMEM[0x4C0]
+- **SETBUFF HLE**: Writes to both param banks (0x00 and 0x10 offsets)
 - **RESAMPLE**: Fixed infinite loop in op=5 handler (setup/body label split)
+- **Null task handling**: DKR submits every 3rd audio task with data_size=0 — silently skipped to prevent 1MB garbage DMA
+- **Unknown opcode tolerance**: Command buffer gaps with uninitialized RDRAM are skipped instead of aborting the task
 - **Scheduler**: Fixed SI message requeue starvation that blocked SP/DP/VI delivery
 - **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS, stereo, byte-order corrected)
 
@@ -101,20 +108,21 @@ tracking/
     main.cpp              # Entry point, SDL init, input, audio, game lifecycle
     rt64_render_context.cpp  # Software renderer + f3ddkr HLE bridge
     f3ddkr.cpp            # f3ddkr HLE implementation
+    audio_diag.cpp        # Audio diagnostic wrappers (alAdpcmPull, alLoadParam, etc.)
     stubs.cpp             # Stub functions for unresolved symbols
     register_overlays.cpp # Overlay registration (none for DKR)
   rsp/
-    aspMain.cpp           # aspMain audio RSP microcode HLE (SETVOL, ENVMIXER, MIXER, etc.)
+    aspMain.cpp           # aspMain audio RSP microcode HLE (all 14 opcodes)
   lib/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```
 
 ## Known Issues
 
-1. **Audio quality**: Audio pipeline produces output on both channels, but some voices have sparse data due to ADPCM decode not activating for all voice slots
-2. **Menu navigation crash**: Selecting menu items can cause visual corruption and crash
-3. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-4. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
+1. **Menu navigation crash**: Selecting menu items can cause visual corruption and crash
+2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
+3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
+4. **Rare logo washout**: Logo occasionally fades from crisp to washed out before menu
 
 ## Credits
 
