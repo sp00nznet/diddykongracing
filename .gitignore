@@ -13,6 +13,10 @@ out/
 *.user
 CMakeSettings.json
 
+# Diagnostic logs
+*.log
+run_diag.ps1
+
 # OS
 Thumbs.db
 .DS_Store
