@@ -1,0 +1,31 @@
+{
+    "rom": "D:\\diddy\\dkr.z64",
+    "emumode": 1,
+    "state_reads": [
+        { "name": "gGameMode",           "addr": "80123A6C", "size": 4 },
+        { "name": "gCurrentMenuId",      "addr": "800DF9F0", "size": 4 },
+        { "name": "gMenuCurIndex",       "addr": "800DF9E0", "size": 4 },
+        { "name": "gMenuStage",          "addr": "800DF9E4", "size": 4 },
+        { "name": "gIsInRace",           "addr": "800DD88C", "size": 4 },
+        { "name": "gScreenStatus",       "addr": "800DD8F0", "size": 4 },
+        { "name": "gRenderMenu",         "addr": "80123A70", "size": 4 },
+        { "name": "gPlayableMapId",      "addr": "80123A7C", "size": 4 },
+        { "name": "gMapId",              "addr": "800DD890", "size": 4 },
+        { "name": "gRaceEndTransition",  "addr": "800DCDD0", "size": 4 },
+        { "name": "gTrackIdToLoad",      "addr": "800DFA54", "size": 4 },
+        { "name": "gGameCurrentCutscene","addr": "80123A88", "size": 4 },
+        { "name": "gCurrDisplayList",    "addr": "80121778", "size": 4 },
+        { "name": "gMusicPlayer",        "addr": "800DCBA0", "size": 4 },
+        { "name": "gNumRacers",          "addr": "8011B470", "size": 4 },
+        { "name": "gActiveCameraID",     "addr": "80121264", "size": 4 },
+        { "name": "gControllerBtnPress", "addr": "801216C0", "size": 4 }
+    ],
+    "labels": {
+        "gGameMode": {
+            "00000000": "INGAME",
+            "00000001": "MENU",
+            "ffffffff": "INTRO",
+            "00000005": "LOCKUP"
+        }
+    }
+}
