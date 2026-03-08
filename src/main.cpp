@@ -19,6 +19,7 @@
 #include "librecomp/rsp.hpp"
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/error_handling.hpp"
+#include "menu_gui.h"
 
 // -----------------------------------------------
 // State Logger — reads key game variables from RDRAM each frame, logs changes
@@ -279,6 +280,9 @@ static SDL_GameController* controller = nullptr;
 void poll_input() {
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+        // Pass events to ImGui first
+        menu_gui_process_event(&event);
+
         switch (event.type) {
             case SDL_QUIT:
                 ultramodern::quit();
@@ -428,7 +432,14 @@ ultramodern::renderer::WindowHandle create_window(void* gfx_data) {
     return ultramodern::renderer::WindowHandle{ wminfo.info.win.window, GetCurrentThreadId() };
 }
 
+static bool quit_callback_set = false;
+
 void update_gfx(void* gfx_data) {
+    // Set quit callback once (renderer creates ImGui, so we set it on first update_gfx call)
+    if (!quit_callback_set) {
+        menu_gui_set_quit_callback([]() { ultramodern::quit(); });
+        quit_callback_set = true;
+    }
     poll_input();
 }
 
@@ -654,6 +665,7 @@ int main(int argc, char* argv[]) {
     }
 
     fprintf(stderr, "[DKR] Loading ROM: %s\n", rom_path.string().c_str()); fflush(stderr);
+    menu_gui_set_rom_path(rom_path.string().c_str());
     std::vector<uint8_t> rom_data = read_rom_file(rom_path);
     if (rom_data.empty()) {
         MessageBoxA(nullptr, "Failed to read ROM file.", "DKR Recompiled - Error", MB_OK | MB_ICONERROR);

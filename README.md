@@ -7,24 +7,36 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Stable — boots through intro flyby, title screen, and menus (audio FX crash fixed)
+- **Runtime**: Stable — boots through intro flyby, character select scenes, title screen, and menus
+- **Rendering**: All scenes right-side up (antipiracy viewport bypass, single-stage vertex transform)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
+- **GUI**: ImGui overlay — menu bar (File/Config/About), settings window (F1), debug overlay (F2)
 - **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
 - **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled as workaround)
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline
+- **Antipiracy bypass**: DKR checks ROM integrity at boot — recompiled binary triggers the check, flipping the viewport. Bypassed by forcing `gAntiPiracyViewport = FALSE` in RDRAM
+- **Single-stage vertex transform**: Decomp-confirmed — no two-stage multiply in f3ddkr RSP; game pre-combines MVP matrices
+- **Viewport Y-flip**: N64 positive vscale_y negated for correct software rasterizer orientation
 - **Color combiner**: N64 (A-B)*C+D formula, 1-cycle and 2-cycle modes
 - **RDP blender**: Full (P*A + M*B)/(A+B) formula with FORCE_BL support
 - **Distance fog**: Per-vertex fog computation via RSP HLE (G_FOG geometry mode)
 - **Alpha blending**: Framebuffer read-modify-write with configurable blend modes
 - **Alpha test**: Transparent pixels correctly skipped
 - **TEXRECT**: Textured rectangles in copy and combiner modes
-- **Triangles**: Scanline rasterizer with Z-buffer, backface culling, scissor clipping
+- **Triangles**: Scanline rasterizer with Z-buffer, scissor clipping
 - **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
 - **Fill rect**: Fill/1-cycle/2-cycle modes
+
+### GUI (ImGui)
+- **Menu bar**: File (Quit), Config (Settings), About (Help)
+- **Settings window** (F1): General (ROM file selector), Display, Input, Audio tabs
+- **Debug overlay** (F2): FPS graph, display info
+- **Help window**: Project info, repository link, credits
+- **Theme**: xemu-inspired dark green
 
 ### Audio Pipeline
 - **aspMain HLE**: Recompiled RSP audio microcode (MIPS to C++) with HLE intercepts for broken dispatch handlers
@@ -81,15 +93,13 @@ Copy-Item 'build\_deps\sdl2-build\Release\SDL2.dll' 'build\Release\SDL2.dll'
 
 ## Running
 
-Place your ROM as `build/Release/baserom.us.z64` or pass it as argument:
+Use the launch script from the project root:
 ```
-DKRRecompiled.exe "path/to/Diddy Kong Racing (U) [!].z64"
+run_dkr.bat
+run_dkr.bat "path\to\Diddy Kong Racing (U) [!].z64"
 ```
 
-Or use the run script:
-```powershell
-powershell -ExecutionPolicy Bypass -File build\Release\run_dkr.ps1
-```
+Or place your ROM as `build/Release/baserom.us.z64` and run the exe directly. You can also select a ROM via the in-game Settings menu (F1 -> General -> Browse).
 
 ### ROM Requirements
 - Diddy Kong Racing (US) v1.1 (v80)
@@ -100,19 +110,24 @@ powershell -ExecutionPolicy Bypass -File build\Release\run_dkr.ps1
 ```
 tracking/
   CMakeLists.txt          # Build configuration
+  run_dkr.bat             # Launch script
   dkr.recomp.toml         # N64Recomp configuration
   dkr.us.syms.toml        # Symbol definitions (1956 functions)
   include/
     f3ddkr.h              # f3ddkr microcode definitions and state
+    menu_gui.h            # ImGui menu system API
   src/
     main.cpp              # Entry point, SDL init, input, audio, game lifecycle
-    rt64_render_context.cpp  # Software renderer + f3ddkr HLE bridge
-    f3ddkr.cpp            # f3ddkr HLE implementation
+    rt64_render_context.cpp  # Software renderer + ImGui overlay bridge
+    f3ddkr.cpp            # f3ddkr HLE implementation (antipiracy bypass, vertex transform)
+    menu_gui.cpp          # ImGui menu system (settings, debug, help)
     audio_diag.cpp        # Audio diagnostic wrappers (alAdpcmPull, alLoadParam, etc.)
     stubs.cpp             # Stub functions for unresolved symbols
     register_overlays.cpp # Overlay registration (none for DKR)
   rsp/
     aspMain.cpp           # aspMain audio RSP microcode HLE (all 14 opcodes)
+  third_party/
+    imgui/                # Dear ImGui (SDL2 + SDLRenderer2 backends)
   lib/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```

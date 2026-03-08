@@ -42,6 +42,17 @@ if (MSVC)
     target_compile_options(RecompiledFuncs PRIVATE /w /Zi)
 endif()
 
+# Dear ImGui
+set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+)
+
 # Main executable
 add_executable(DKRRecompiled
     src/main.cpp
@@ -50,12 +61,16 @@ add_executable(DKRRecompiled
     src/f3ddkr.cpp
     src/stubs.cpp
     src/audio_diag.cpp
+    src/menu_gui.cpp
     rsp/aspMain.cpp
+    ${IMGUI_SOURCES}
 )
 
 target_include_directories(DKRRecompiled PRIVATE
     include
     RecompiledFuncs
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
     lib/N64ModernRuntime/ultramodern/include
     lib/N64ModernRuntime/librecomp/include
     lib/N64ModernRuntime/N64Recomp/include
