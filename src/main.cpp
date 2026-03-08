@@ -20,6 +20,128 @@
 #include "ultramodern/ultramodern.hpp"
 #include "ultramodern/error_handling.hpp"
 
+// -----------------------------------------------
+// State Logger — reads key game variables from RDRAM each frame, logs changes
+// Enable with environment variable DKR_STATE_LOG=1
+// -----------------------------------------------
+
+// RDRAM base pointer (defined in rt64_render_context.cpp)
+extern uint8_t* get_rdram_base();
+
+// Read a big-endian 32-bit value from RDRAM at a virtual N64 address.
+// N64Recomp stores 32-bit words in native host order, so a simple
+// dereference at the physical offset gives the correct value.
+static inline uint32_t state_read_u32(uint8_t* rdram, uint32_t vaddr) {
+    uint32_t phys = (vaddr - 0x80000000u) & 0x7FFFFFu;
+    return *(uint32_t*)(rdram + phys);
+}
+
+// Read a big-endian signed 8-bit value. Byte access uses XOR 3.
+static inline int8_t state_read_s8(uint8_t* rdram, uint32_t vaddr) {
+    uint32_t phys = (vaddr - 0x80000000u) & 0x7FFFFFu;
+    return (int8_t)rdram[phys ^ 3];
+}
+
+// Read a big-endian unsigned 16-bit value. Halfword access uses XOR 2.
+static inline uint16_t state_read_u16(uint8_t* rdram, uint32_t vaddr) {
+    uint32_t phys = (vaddr - 0x80000000u) & 0x7FFFFFu;
+    return *(uint16_t*)(rdram + (phys ^ 2));
+}
+
+struct StateEntry {
+    const char* name;
+    uint32_t    vaddr;
+    int         size;   // 1=s8, 2=u16, 4=u32(s32)
+    uint32_t    prev;   // previous value (zero-init is fine, first change will log)
+    bool        initialized;
+};
+
+static const char* game_mode_name(int32_t v) {
+    switch (v) {
+        case -1: return "INTRO";
+        case  0: return "INGAME";
+        case  1: return "MENU";
+        case  5: return "LOCKUP";
+        default: return "?";
+    }
+}
+
+static StateEntry state_entries[] = {
+    { "gGameMode",            0x80123A6C, 4, 0, false },
+    { "gCurrentMenuId",       0x800DF9F0, 1, 0, false },
+    { "gMenuCurIndex",        0x800DF9E0, 4, 0, false },
+    { "gMenuStage",           0x800DF9E4, 4, 0, false },
+    { "gIsInRace",            0x800DD88C, 4, 0, false },
+    { "gScreenStatus",        0x800DD8F0, 4, 0, false },
+    { "gRenderMenu",          0x80123A70, 4, 0, false },
+    { "gPlayableMapId",       0x80123A7C, 4, 0, false },
+    { "gMapId",               0x800DD890, 4, 0, false },
+    { "gRaceEndTransition",   0x800DCDD0, 4, 0, false },
+    { "gTrackIdToLoad",       0x800DFA54, 4, 0, false },
+    { "gGameCurrentCutscene", 0x80123A88, 4, 0, false },
+    { "gCurrDisplayList",     0x80121778, 4, 0, false },
+    { "gMusicPlayer",         0x800DCBA0, 4, 0, false },
+    { "gNumRacers",           0x8011B470, 4, 0, false },
+    { "gActiveCameraID",      0x80121264, 4, 0, false },
+    { "gControllerBtnPress",  0x801216C0, 2, 0, false },
+};
+static constexpr int NUM_STATE_ENTRIES = sizeof(state_entries) / sizeof(state_entries[0]);
+
+static bool state_log_enabled = false;
+static bool state_log_checked = false;
+
+static void state_log_poll() {
+    // One-time env check
+    if (!state_log_checked) {
+        state_log_checked = true;
+        const char* env = getenv("DKR_STATE_LOG");
+        state_log_enabled = (env && env[0] == '1');
+        if (state_log_enabled) {
+            fprintf(stderr, "[STATE] State logger enabled (%d entries)\n", NUM_STATE_ENTRIES);
+            fflush(stderr);
+        }
+    }
+    if (!state_log_enabled) return;
+
+    uint8_t* rdram = get_rdram_base();
+    if (!rdram) return;
+
+    for (int i = 0; i < NUM_STATE_ENTRIES; i++) {
+        StateEntry& e = state_entries[i];
+        uint32_t cur = 0;
+        switch (e.size) {
+            case 1: cur = (uint32_t)(uint8_t)state_read_s8(rdram, e.vaddr); break;
+            case 2: cur = state_read_u16(rdram, e.vaddr); break;
+            case 4: cur = state_read_u32(rdram, e.vaddr); break;
+        }
+
+        if (!e.initialized) {
+            e.prev = cur;
+            e.initialized = true;
+            // Log initial value
+            if (i == 0) { // gGameMode gets label
+                fprintf(stderr, "[STATE] %s: init = %d (%s)\n", e.name, (int32_t)cur, game_mode_name((int32_t)cur));
+            } else {
+                fprintf(stderr, "[STATE] %s: init = %d (0x%X)\n", e.name, (int32_t)cur, cur);
+            }
+            continue;
+        }
+
+        if (cur != e.prev) {
+            if (i == 0) { // gGameMode gets label
+                fprintf(stderr, "[STATE] %s: %d (%s) -> %d (%s)\n",
+                    e.name, (int32_t)e.prev, game_mode_name((int32_t)e.prev),
+                    (int32_t)cur, game_mode_name((int32_t)cur));
+            } else {
+                fprintf(stderr, "[STATE] %s: %d -> %d (0x%X)\n",
+                    e.name, (int32_t)e.prev, (int32_t)cur, cur);
+            }
+            fflush(stderr);
+            e.prev = cur;
+        }
+    }
+}
+
 // Declare the recompiled entrypoint
 extern "C" void recomp_entrypoint(uint8_t* rdram, recomp_context* ctx);
 
@@ -65,7 +187,7 @@ static SDL_AudioDeviceID audio_device = 0;
 static int audio_queue_count = 0;
 
 // RDRAM base pointer (set by renderer context init, used for bounds checking)
-extern uint8_t* get_rdram_base();
+// (declared earlier in state logger section)
 
 void queue_audio_samples(int16_t* samples, size_t num_samples) {
     if (audio_device == 0 || num_samples == 0) return;
@@ -321,7 +443,8 @@ void show_message_box(const char* msg) {
 // Events
 // -----------------------------------------------
 void vi_callback() {
-    // Could be used for FPS counting or frame pacing
+    // Poll game state from RDRAM and log changes
+    state_log_poll();
 }
 
 void gfx_init_callback() {
