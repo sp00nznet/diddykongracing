@@ -2,17 +2,17 @@
 
 Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
 
-![Title Screen](screenshots/game_05.png)
+![Diddy Flyby with N64 Logo](images/diddy_flyby_n64_logo.png)
 
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Stable — boots to title screen and menus
+- **Runtime**: Stable — boots through intro flyby, title screen, and menus (audio FX crash fixed)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
 - **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
-- **Audio**: Full HLE audio pipeline — all 14 aspMain opcodes active, sustained full-scale stereo output at 22050 Hz
+- **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled as workaround)
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline

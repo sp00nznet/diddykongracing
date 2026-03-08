@@ -257,7 +257,7 @@ void set_audio_frequency(uint32_t freq) {
     desired.freq = (int)freq;
     desired.format = AUDIO_S16SYS;
     desired.channels = 2;
-    desired.samples = 1024;
+    desired.samples = 256;  // Reduced from 1024 for lower latency
     desired.callback = nullptr;
     SDL_AudioSpec obtained{};
     audio_device = SDL_OpenAudioDevice(nullptr, 0, &desired, &obtained, 0);
