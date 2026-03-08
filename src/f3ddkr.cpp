@@ -30,8 +30,8 @@ static void f3ddkr_init(uint8_t* rdram) {
     g_state.rdram = rdram;
 
     // Default viewport: 320x240 centered
-    g_state.vp_scale_x = -160.0f; // DKR default: negative
-    g_state.vp_scale_y = -120.0f;
+    g_state.vp_scale_x = 160.0f;
+    g_state.vp_scale_y = -120.0f; // Negated: N64 positive vscale maps to our negative
     g_state.vp_trans_x = 160.0f;
     g_state.vp_trans_y = 120.0f;
     g_state.vp_x = 0;
@@ -558,11 +558,18 @@ static void load_matrix(uint32_t rdram_addr, int index) {
     }
 }
 
+static void multiply_matrices(const float a[4][4], const float b[4][4], float out[4][4]) {
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            out[i][j] = a[i][0]*b[0][j] + a[i][1]*b[1][j] + a[i][2]*b[2][j] + a[i][3]*b[3][j];
+}
+
 static void cmd_mtx(uint32_t w0, uint32_t w1) {
-    // gSPMatrixDKR: gDma1p(pkt, G_MTX, m, sizeof(Mtx), (i) << 6)
+    // gSPMatrixDKR: gDma1p(pkt, G_MTX, m, sizeof(Mtx), param)
     // w0 = (0x01 << 24) | ((param & 0xFF) << 16) | (length & 0xFFFF)
-    // param = index << 6, so index = (w0 >> 22) & 0x3
+    // param bits: [7:6] = index, [5] = multiply flag (G_MTX_DKR_MULTIPLY = 0x20)
     int index = (w0 >> 22) & 0x3;
+    int multiply = (w0 >> 21) & 1;
     uint32_t addr = w1;
 
     log_cmd(F3DDKR_G_MTX, "G_MTX", w0, w1);
@@ -572,10 +579,30 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
         addr += g_state.matrix_dma_offset;
     }
 
-    load_matrix(addr, index);
+    if (multiply && index != 0) {
+        // G_MTX_DKR_MULTIPLY: multiply slot 0 (VP) by loaded matrix (model).
+        // GLideN64 order: result = slot0 * loaded (matches gSPDMAMatrix).
+        float loaded[4][4];
+        load_matrix(addr, index);
+        memcpy(loaded, g_state.matrices[index], sizeof(loaded));
+        multiply_matrices(g_state.matrices[0], loaded, g_state.matrices[index]);
+    } else {
+        // Direct load (no multiply) — matrix is pre-combined MVP or VP itself.
+        load_matrix(addr, index);
+    }
+
+    // Log first 100 matrix loads for diagnostics
+    static int mtx_cmd_count = 0;
+    if (mtx_cmd_count < 100) {
+        fprintf(stderr, "[F3DDKR] G_MTX idx=%d mul=%d addr=0x%08X M11=%g M33=%g\n",
+                index, multiply, addr,
+                g_state.matrices[index][1][1],
+                g_state.matrices[index][3][3]);
+        fflush(stderr);
+        mtx_cmd_count++;
+    }
 
     // In f3ddkr microcode, G_MTX both loads AND activates the matrix slot.
-    // The VTX command transforms vertices using the last-loaded matrix.
     g_state.active_matrix_index = index;
 
 }
@@ -585,9 +612,12 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
 // ============================================================
 static void transform_vertex(float x, float y, float z, int mat_idx,
                               float& cx, float& cy, float& cz, float& cw) {
+    // DKR f3ddkr: single-stage vertex transform.
+    // The game pre-combines MVP into the matrix slot (via G_MTX_DKR_MULTIPLY or
+    // by uploading a pre-combined matrix). No two-stage multiply in RSP.
+    // Billboard (idx=2) vertices are added to anchor vertex clip coords separately.
     const float (*m)[4] = g_state.matrices[mat_idx];
-    // N64 row-vector convention: clip = [x, y, z, 1] * matrix
-    // result[j] = sum_i(vertex[i] * matrix[i][j])
+    // N64 row-vector convention: result[j] = sum_i(vertex[i] * matrix[i][j])
     cx = m[0][0]*x + m[1][0]*y + m[2][0]*z + m[3][0];
     cy = m[0][1]*x + m[1][1]*y + m[2][1]*z + m[3][1];
     cz = m[0][2]*x + m[1][2]*y + m[2][2]*z + m[3][2];
@@ -1257,13 +1287,9 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
         // Skip if any vertex is behind camera (w <= 0)
         if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
 
-        // Backface culling using screen-space cross product
-        // Note: vp_scale_y is negated from raw RDRAM value, which reverses winding order.
-        // Use >= 0 instead of <= 0 to compensate for the Y flip.
-        float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
-        if (!(flags & TRI_BACKFACE_DRAW)) {
-            if (cross >= 0.0f) continue;
-        }
+        // Backface culling disabled — verify orientation first, then re-enable
+        // float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
+        // if (cross < 0) continue;
 
         // UV coordinates from triangle struct (s10.5 fixed-point → s16)
         float u0 = 0, v0_tc = 0, u1 = 0, v1_tc = 0, u2 = 0, v2_tc = 0;
@@ -1633,12 +1659,12 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                     int16_t vscale_y = rdram_read_s16(g_state.rdram, vp_addr + 2);
                     int16_t vtrans_x = rdram_read_s16(g_state.rdram, vp_addr + 8);
                     int16_t vtrans_y = rdram_read_s16(g_state.rdram, vp_addr + 10);
-                    // Store raw viewport values (divided by 4 to get screen units)
-                    // DKR's f3ddkr microcode: negate Y scale for correct screen mapping.
-                    // The game stores negative vscale_y in RDRAM but the RSP applies
-                    // the absolute value for the viewport transform (Y+ clip → Y+ screen).
+                    // Store viewport values (divided by 4 to get screen units).
+                    // Negate vscale_y: N64 RSP convention maps positive clip_y to
+                    // large screen_y (bottom), but our software rasterizer needs
+                    // the opposite mapping for correct top-to-bottom rendering.
                     g_state.vp_scale_x = (float)vscale_x / 4.0f;
-                    g_state.vp_scale_y = (float)(-vscale_y) / 4.0f;
+                    g_state.vp_scale_y = -(float)vscale_y / 4.0f;
                     g_state.vp_trans_x = (float)vtrans_x / 4.0f;
                     g_state.vp_trans_y = (float)vtrans_y / 4.0f;
                     // Derived positive dimensions for scissor/clipping
@@ -1646,9 +1672,10 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                     g_state.vp_h = fabsf(g_state.vp_scale_y) * 2.0f;
                     g_state.vp_x = g_state.vp_trans_x - g_state.vp_w / 2.0f;
                     g_state.vp_y = g_state.vp_trans_y - g_state.vp_h / 2.0f;
-                    if (g_state.cmd_counts[0x03] < LOG_FIRST_N) {
-                        fprintf(stderr, "[F3DDKR] G_MOVEMEM(viewport): vp=(%g,%g %gx%g) scale=(%g,%g) trans=(%g,%g)\n",
-                                g_state.vp_x, g_state.vp_y, g_state.vp_w, g_state.vp_h,
+                    // Log first few viewport changes only (reduce per-frame spam)
+                    if (g_state.cmd_counts[0x03] < 50) {
+                        fprintf(stderr, "[F3DDKR] G_MOVEMEM(viewport) #%d: raw_y=%d scale=(%g,%g) trans=(%g,%g)\n",
+                                g_state.cmd_counts[0x03], (int)vscale_y,
                                 g_state.vp_scale_x, g_state.vp_scale_y,
                                 g_state.vp_trans_x, g_state.vp_trans_y);
                         fflush(stderr);
@@ -1736,8 +1763,31 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
         f3ddkr_init(rdram);
     }
     g_state.rdram = rdram;
+
+    // Bypass DKR antipiracy: force gAntiPiracyViewport (0x800DD5D0) = FALSE.
+    // The recompiled binary triggers the antipiracy check (ROM tamper detection),
+    // which negates viewport halfWidth/halfHeight, flipping 3D scenes upside down.
+    // Physical address = 0x800DD5D0 & 0x7FFFFF = 0x0DD5D0
+    {
+        uint32_t ap_phys = 0x0DD5D0;
+        if (ap_phys + 3 < 0x800000) {
+            rdram[ap_phys ^ 3] = 0;
+            rdram[(ap_phys + 1) ^ 3] = 0;
+            rdram[(ap_phys + 2) ^ 3] = 0;
+            rdram[(ap_phys + 3) ^ 3] = 0;
+        }
+    }
     g_state.dl_stack_depth = 0;
     g_state.dl_total_count++;
+
+    // Reset per-DL state to prevent stale values from previous scenes.
+    // DMA offsets are scene-specific and MUST be reset — stale offsets cause
+    // matrices/vertices to load from wrong RDRAM addresses ("giant polygons").
+    g_state.matrix_dma_offset = 0;
+    g_state.vertex_dma_offset = 0;
+    g_state.active_matrix_index = 0;
+    g_state.billboard_enabled = false;
+    g_state.num_vertices = 0;
 
     uint32_t phys = addr_to_phys(dl_addr);
 

@@ -12,6 +12,7 @@
 
 #include "ultramodern/renderer_context.hpp"
 #include "f3ddkr.h"
+#include "menu_gui.h"
 
 // SDL window from main.cpp
 extern SDL_Window* get_sdl_window();
@@ -20,8 +21,12 @@ extern SDL_Window* get_sdl_window();
 static uint8_t* g_rdram_base = nullptr;
 uint8_t* get_rdram_base() { return g_rdram_base; }
 
+// Global SDL_Renderer for ImGui access
+static SDL_Renderer* g_sdl_renderer = nullptr;
+SDL_Renderer* get_sdl_renderer() { return g_sdl_renderer; }
+
 // Pure software framebuffer renderer - reads N64 framebuffer from RDRAM via VI registers
-// and displays it using SDL window surface (no GPU renderer needed).
+// and displays it using SDL_Renderer + SDL_Texture (compatible with ImGui overlay).
 class SoftwareRendererContext : public ultramodern::renderer::RendererContext {
 public:
     SoftwareRendererContext(uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode)
@@ -31,11 +36,31 @@ public:
         setup_result = ultramodern::renderer::SetupResult::Success;
 
         window_ = get_sdl_window();
-        fprintf(stderr, "[DKR-GFX] Software renderer init, RDRAM=0x%p, window=%p\n", rdram, window_);
+
+        // Create SDL_Renderer (required for ImGui SDL_Renderer2 backend)
+        renderer_ = SDL_CreateRenderer(window_, -1,
+            SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+        if (!renderer_) {
+            // Fallback to software renderer
+            renderer_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
+        }
+        g_sdl_renderer = renderer_;
+
+        // Initialize ImGui menu system
+        if (window_ && renderer_) {
+            menu_gui_init(window_, renderer_);
+        }
+
+        fprintf(stderr, "[DKR-GFX] Software renderer init, RDRAM=0x%p, window=%p, renderer=%p\n",
+                rdram, window_, renderer_);
         fflush(stderr);
     }
 
     ~SoftwareRendererContext() override {
+        menu_gui_shutdown();
+        if (fb_texture_) SDL_DestroyTexture(fb_texture_);
+        if (renderer_) SDL_DestroyRenderer(renderer_);
+        g_sdl_renderer = nullptr;
     }
 
     bool valid() override {
@@ -61,7 +86,7 @@ public:
     }
 
     void update_screen() override {
-        if (!window_ || !rdram_) return;
+        if (!window_ || !rdram_ || !renderer_) return;
 
         screen_count_++;
 
@@ -98,6 +123,8 @@ public:
         // 0 = blank, 2 = 16-bit (RGBA5551), 3 = 32-bit (RGBA8888)
         uint32_t pixel_size = vi_status & 0x3;
         if (pixel_size < 2 || vi_origin == 0 || vi_width == 0) {
+            // Still present the frame (for ImGui overlay on blank frames)
+            present_frame(0, 0);
             return;
         }
 
@@ -118,9 +145,7 @@ public:
         if (screen_width > 640) screen_width = 640;
         if (screen_height > 480) screen_height = 480;
 
-        // Use VI_ORIGIN for display - the game sets this to the buffer it wants shown
-        // (the front buffer). VI_ORIGIN is offset ~1 scanline from the rendering CI address.
-        // This ensures we always display the completed frame, not a buffer being cleared/drawn.
+        // Use VI_ORIGIN for display
         uint32_t fb_offset = vi_origin & 0x7FFFFF;
 
         // Get width from HLE if available
@@ -131,6 +156,7 @@ public:
         uint32_t fb_size = screen_width * screen_height * bytes_per_pixel;
 
         if (fb_offset + fb_size > 0x800000) {
+            present_frame(0, 0);
             return;
         }
 
@@ -177,44 +203,25 @@ public:
             }
         }
 
-        // Blit to window surface
-        SDL_Surface* window_surface = SDL_GetWindowSurface(window_);
-        if (!window_surface) {
-            if (screen_count_ <= 5) {
-                fprintf(stderr, "[DKR-GFX] SDL_GetWindowSurface failed: %s\n", SDL_GetError());
-                fflush(stderr);
-            }
-            return;
+        // Update or recreate texture if dimensions changed
+        if (fb_texture_width_ != screen_width || fb_texture_height_ != screen_height) {
+            if (fb_texture_) SDL_DestroyTexture(fb_texture_);
+            fb_texture_ = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_ARGB8888,
+                                            SDL_TEXTUREACCESS_STREAMING,
+                                            screen_width, screen_height);
+            fb_texture_width_ = screen_width;
+            fb_texture_height_ = screen_height;
         }
 
-        // Create an SDL surface from our converted buffer
-        SDL_Surface* fb_surface = SDL_CreateRGBSurfaceFrom(
-            conv_buffer_.data(),
-            screen_width, screen_height,
-            32,
-            screen_width * 4,
-            0x00FF0000,  // R mask
-            0x0000FF00,  // G mask
-            0x000000FF,  // B mask
-            0xFF000000   // A mask
-        );
-
-        if (fb_surface) {
-            // Clear window surface to black before blit to prevent stale content
-            // from previous frames showing through (fixes double-buffer artifact
-            // when game's scissor-clipped fill_rect doesn't clear the entire screen)
-            SDL_FillRect(window_surface, nullptr, SDL_MapRGB(window_surface->format, 0, 0, 0));
-
-            // Scale blit to fill window
-            SDL_BlitScaled(fb_surface, nullptr, window_surface, nullptr);
-            SDL_FreeSurface(fb_surface);
+        // Upload framebuffer to texture
+        if (fb_texture_) {
+            SDL_UpdateTexture(fb_texture_, nullptr, conv_buffer_.data(), screen_width * 4);
         }
 
-        SDL_UpdateWindowSurface(window_);
+        present_frame(screen_width, screen_height);
 
         // Periodically log framebuffer content check
         if (screen_count_ <= 5 || screen_count_ == 100 || screen_count_ == 200 || screen_count_ % 500 == 0) {
-            // Scan entire framebuffer for non-fill pixels
             int non_fill = 0;
             int non_zero = 0;
             uint16_t first_nonfill_val = 0;
@@ -228,7 +235,7 @@ public:
                         uint8_t lo = rdram_[(off + 1) ^ 3];
                         uint16_t px = (hi << 8) | lo;
                         if (px != 0) non_zero++;
-                        if (px > 0x0001 && px != 0xFFFC) { // not zero, not fill black (0x0001), not z-fill (0xFFFC)
+                        if (px > 0x0001 && px != 0xFFFC) {
                             non_fill++;
                             if (non_fill == 1) {
                                 first_nonfill_val = px;
@@ -263,9 +270,32 @@ public:
     }
 
 private:
+    void present_frame(uint32_t fb_width, uint32_t fb_height) {
+        // Clear renderer
+        SDL_SetRenderDrawColor(renderer_, 0, 0, 0, 255);
+        SDL_RenderClear(renderer_);
+
+        // Draw game framebuffer texture
+        if (fb_texture_ && fb_width > 0 && fb_height > 0) {
+            // Scale to fill window while maintaining aspect ratio
+            SDL_RenderCopy(renderer_, fb_texture_, nullptr, nullptr);
+        }
+
+        // Render ImGui overlay on top
+        menu_gui_begin_frame();
+        menu_gui_render();
+
+        // Present
+        SDL_RenderPresent(renderer_);
+    }
+
     uint8_t* rdram_ = nullptr;
     ultramodern::renderer::ViRegs* vi_regs_ = nullptr;
     SDL_Window* window_ = nullptr;
+    SDL_Renderer* renderer_ = nullptr;
+    SDL_Texture* fb_texture_ = nullptr;
+    uint32_t fb_texture_width_ = 0;
+    uint32_t fb_texture_height_ = 0;
     std::vector<uint8_t> conv_buffer_;
     int dl_count_ = 0;
     int screen_count_ = 0;
