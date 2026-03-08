@@ -573,6 +573,11 @@ static void cmd_mtx(uint32_t w0, uint32_t w1) {
     }
 
     load_matrix(addr, index);
+
+    // In f3ddkr microcode, G_MTX both loads AND activates the matrix slot.
+    // The VTX command transforms vertices using the last-loaded matrix.
+    g_state.active_matrix_index = index;
+
 }
 
 // ============================================================
@@ -1253,9 +1258,11 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
         if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
 
         // Backface culling using screen-space cross product
+        // Note: vp_scale_y is negated from raw RDRAM value, which reverses winding order.
+        // Use >= 0 instead of <= 0 to compensate for the Y flip.
         float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
         if (!(flags & TRI_BACKFACE_DRAW)) {
-            if (cross <= 0.0f) continue;
+            if (cross >= 0.0f) continue;
         }
 
         // UV coordinates from triangle struct (s10.5 fixed-point → s16)
@@ -1627,9 +1634,11 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                     int16_t vtrans_x = rdram_read_s16(g_state.rdram, vp_addr + 8);
                     int16_t vtrans_y = rdram_read_s16(g_state.rdram, vp_addr + 10);
                     // Store raw viewport values (divided by 4 to get screen units)
-                    // PRESERVES SIGN — negative scale flips axes and winding order
+                    // DKR's f3ddkr microcode: negate Y scale for correct screen mapping.
+                    // The game stores negative vscale_y in RDRAM but the RSP applies
+                    // the absolute value for the viewport transform (Y+ clip → Y+ screen).
                     g_state.vp_scale_x = (float)vscale_x / 4.0f;
-                    g_state.vp_scale_y = (float)vscale_y / 4.0f;
+                    g_state.vp_scale_y = (float)(-vscale_y) / 4.0f;
                     g_state.vp_trans_x = (float)vtrans_x / 4.0f;
                     g_state.vp_trans_y = (float)vtrans_y / 4.0f;
                     // Derived positive dimensions for scissor/clipping
