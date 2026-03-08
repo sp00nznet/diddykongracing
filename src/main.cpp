@@ -68,7 +68,7 @@ static const char* game_mode_name(int32_t v) {
 
 static StateEntry state_entries[] = {
     { "gGameMode",            0x80123A6C, 4, 0, false },
-    { "gCurrentMenuId",       0x800DF9F0, 1, 0, false },
+    { "gCurrentMenuId",       0x800DF9F0, 4, 0, false },
     { "gMenuCurIndex",        0x800DF9E0, 4, 0, false },
     { "gMenuStage",           0x800DF9E4, 4, 0, false },
     { "gIsInRace",            0x800DD88C, 4, 0, false },
@@ -84,6 +84,8 @@ static StateEntry state_entries[] = {
     { "gNumRacers",           0x8011B470, 4, 0, false },
     { "gActiveCameraID",      0x80121264, 4, 0, false },
     { "gControllerBtnPress",  0x801216C0, 2, 0, false },
+    { "gIsLoading",           0x80123A94, 4, 0, false },
+    { "gBgloadActive",        0x800E3D00, 4, 0, false },
 };
 static constexpr int NUM_STATE_ENTRIES = sizeof(state_entries) / sizeof(state_entries[0]);
 
@@ -313,12 +315,10 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     auto auto_press = [&](uint32_t at_ms, uint16_t btn) {
         if (elapsed_ms >= at_ms && elapsed_ms < at_ms + 200) *buttons |= btn;
     };
-    auto_press(4000, 0x1000);  // Start at 4s (skip Nintendo logo)
-    auto_press(8000, 0x1000);  // Start at 8s (skip Rareware logo)
-    auto_press(12000, 0x1000); // Start at 12s (advance title screen)
-    auto_press(16000, 0x8000); // A at 16s (select menu option)
-    auto_press(20000, 0x8000); // A at 20s (continue advancing)
-    auto_press(24000, 0x8000); // A at 24s (continue advancing)
+    // Auto-input disabled for debugging. Use keyboard/gamepad to navigate.
+    // auto_press(4000, 0x1000);  // Start at 4s (skip Nintendo logo)
+    // auto_press(8000, 0x1000);  // Start at 8s (skip Rareware logo)
+    // auto_press(12000, 0x1000); // Start at 12s (advance title screen)
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 

@@ -4468,7 +4468,9 @@ RECOMP_FUNC void _loadOutputBuffer(uint8_t* rdram, recomp_context* ctx) {
     // 0x80064484: or          $s0, $a1, $zero
     ctx->r16 = ctx->r5 | 0;
     // 0x80064488: beq         $t6, $zero, L_80064694
-    if (ctx->r14 == 0) {
+    // PATCHED: Also skip resampler path if d->rs is corrupted (not a valid KSEG0 pointer).
+    // Heap corruption from delay line buffer overflow can overwrite d->rs with audio samples.
+    if (ctx->r14 == 0 || (uint32_t)ctx->r14 < 0x80000000u || (uint32_t)ctx->r14 >= 0x80800000u) {
         // 0x8006448C: or          $s2, $a3, $zero
         ctx->r18 = ctx->r7 | 0;
             goto L_80064694;
@@ -4867,18 +4869,12 @@ RECOMP_FUNC void _loadBuffer(uint8_t* rdram, recomp_context* ctx) {
     ctx->r2 = MEM_W(ctx->r4, 0X14);
     // 0x80064700: sll         $t7, $v1, 1
     ctx->r15 = S32(ctx->r3 << 1);
-    // 0x80064704: sltu        $at, $a1, $v0
-    ctx->r1 = ctx->r5 < ctx->r2 ? 1 : 0;
-    // 0x80064708: beq         $at, $zero, L_80064714
-    if (ctx->r1 == 0) {
-        // 0x8006470C: addu        $t0, $v0, $t7
-        ctx->r8 = ADD32(ctx->r2, ctx->r15);
-            goto L_80064714;
+    // PATCHED: Loop instead of single correction to handle large delay offsets.
+    // Use 32-bit comparison to match MIPS sltu semantics on wrapped addresses.
+    ctx->r8 = ADD32(ctx->r2, ctx->r15);  // delay_end = r->base + r->length*2
+    while ((uint32_t)ctx->r5 < (uint32_t)ctx->r2) {
+        ctx->r5 = ADD32(ctx->r5, ctx->r15);  // curr_ptr += r->length*2
     }
-    // 0x8006470C: addu        $t0, $v0, $t7
-    ctx->r8 = ADD32(ctx->r2, ctx->r15);
-    // 0x80064710: addu        $a1, $a1, $t7
-    ctx->r5 = ADD32(ctx->r5, ctx->r15);
 L_80064714:
     // 0x80064714: lw          $a2, 0x6C($sp)
     ctx->r6 = MEM_W(ctx->r29, 0X6C);
@@ -5102,18 +5098,11 @@ RECOMP_FUNC void _saveBuffer(uint8_t* rdram, recomp_context* ctx) {
     ctx->r2 = MEM_W(ctx->r4, 0X14);
     // 0x80064898: sll         $t7, $v1, 1
     ctx->r15 = S32(ctx->r3 << 1);
-    // 0x8006489C: sltu        $at, $a1, $v0
-    ctx->r1 = ctx->r5 < ctx->r2 ? 1 : 0;
-    // 0x800648A0: beq         $at, $zero, L_800648AC
-    if (ctx->r1 == 0) {
-        // 0x800648A4: addu        $t0, $v0, $t7
-        ctx->r8 = ADD32(ctx->r2, ctx->r15);
-            goto L_800648AC;
+    // PATCHED: Loop instead of single correction (same fix as _loadBuffer).
+    ctx->r8 = ADD32(ctx->r2, ctx->r15);  // delay_end = r->base + r->length*2
+    while ((uint32_t)ctx->r5 < (uint32_t)ctx->r2) {
+        ctx->r5 = ADD32(ctx->r5, ctx->r15);  // curr_ptr += r->length*2
     }
-    // 0x800648A4: addu        $t0, $v0, $t7
-    ctx->r8 = ADD32(ctx->r2, ctx->r15);
-    // 0x800648A8: addu        $a1, $a1, $t7
-    ctx->r5 = ADD32(ctx->r5, ctx->r15);
 L_800648AC:
     // 0x800648AC: lw          $a2, 0x6C($sp)
     ctx->r6 = MEM_W(ctx->r29, 0X6C);
