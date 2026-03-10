@@ -536,11 +536,19 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
     CRASH_LOG("\n========== DKR CRASH REPORT ==========\n");
     CRASH_LOG("[DKR] Exception code: 0x%08lX\n", ep->ExceptionRecord->ExceptionCode);
     CRASH_LOG("[DKR] Crash address: 0x%p\n", ep->ExceptionRecord->ExceptionAddress);
+    uint8_t* rdram_base = get_rdram_base();
+    CRASH_LOG("[DKR] RDRAM base: 0x%p\n", rdram_base);
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         ULONG_PTR fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
         CRASH_LOG("[DKR] Access violation %s address 0x%016llX\n",
             ep->ExceptionRecord->ExceptionInformation[0] == 0 ? "reading" : "writing",
             (unsigned long long)fault_addr);
+        if (rdram_base) {
+            int64_t rdram_offset = (int64_t)(fault_addr - (ULONG_PTR)rdram_base);
+            CRASH_LOG("[DKR] RDRAM offset: 0x%llX (%lld bytes, ~%lldMB)\n",
+                (unsigned long long)rdram_offset, (long long)rdram_offset,
+                (long long)(rdram_offset / (1024*1024)));
+        }
     }
 
     HMODULE hmod = GetModuleHandleA(nullptr);

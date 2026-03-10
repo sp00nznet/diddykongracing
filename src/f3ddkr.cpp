@@ -1451,6 +1451,7 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
 
 static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_commands) {
     int cmd_index = 0;
+    int consecutive_unknown = 0;
 
     while (max_commands == 0 || cmd_index < max_commands) {
         uint32_t cmd_addr = dl_phys_addr + cmd_index * 8;
@@ -1738,13 +1739,28 @@ static void process_dl_recursive(uint8_t* rdram, uint32_t dl_phys_addr, int max_
                 break;
 
             default:
-                if (g_state.cmd_counts[op] < 1) {
-                    fprintf(stderr, "[F3DDKR] Unknown opcode 0x%02X: w0=0x%08X w1=0x%08X\n", op, w0, w1);
+                consecutive_unknown++;
+                if (g_state.cmd_counts[op] < 3) {
+                    fprintf(stderr, "[F3DDKR] Unknown opcode 0x%02X: w0=0x%08X w1=0x%08X (DL@0x%06X cmd#%d)\n",
+                            op, w0, w1, dl_phys_addr, cmd_index);
                     fflush(stderr);
                 }
                 g_state.cmd_counts[op]++;
-                break;
+                // 5+ consecutive unknowns = garbage data, bail out
+                if (consecutive_unknown >= 5) {
+                    static int garbage_log_count = 0;
+                    if (garbage_log_count < 10) {
+                        fprintf(stderr, "[F3DDKR] Bailing: %d consecutive unknown opcodes at DL@0x%06X cmd#%d\n",
+                                consecutive_unknown, dl_phys_addr, cmd_index);
+                        fflush(stderr);
+                        garbage_log_count++;
+                    }
+                    return;
+                }
+                continue; // skip the consecutive_unknown reset below
         }
+
+        consecutive_unknown = 0; // reset on valid opcode
 
         // Safety: limit total commands per DL to prevent infinite loops
         if (cmd_index > 10000) {
@@ -1795,6 +1811,20 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
         fprintf(stderr, "[F3DDKR] Processing DL #%d: addr=0x%08X (phys=0x%06X) size=0x%X\n",
                 g_state.dl_total_count, dl_addr, phys, dl_size);
         fflush(stderr);
+    }
+
+    // Validate DL address — DKR code lives at 0x000400..0x0D7B60 in RDRAM.
+    // If the DL points into code space, the game is in a bad state (scene transition).
+    // Skip the DL to avoid parsing MIPS instructions as commands.
+    if (phys >= 0x400 && phys < 0x0D8000) {
+        static int bad_dl_count = 0;
+        if (bad_dl_count < 10) {
+            fprintf(stderr, "[F3DDKR] WARNING: DL #%d addr=0x%08X (phys=0x%06X) points into code space, skipping\n",
+                    g_state.dl_total_count, dl_addr, phys);
+            fflush(stderr);
+            bad_dl_count++;
+        }
+        return;
     }
 
     process_dl_recursive(rdram, phys, 0);
