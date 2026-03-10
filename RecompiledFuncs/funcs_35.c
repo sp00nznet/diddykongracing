@@ -1,9 +1,5 @@
 #include "recomp.h"
 #include "funcs.h"
-#include <stdio.h>
-// Audio diagnostics — counters
-static int _adpcm_pull_calls = 0;
-static int _load_param_calls = 0;
 
 RECOMP_FUNC void alSynSetVol(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -115,23 +111,9 @@ L_800C9C40:
     // 0x800C9C4C: nop
 
 ;}
-static int _syn_start_calls = 0;
 RECOMP_FUNC void alSynStartVoice(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
-    _syn_start_calls++;
-    if (_syn_start_calls <= 30 || (_syn_start_calls % 200) == 0) {
-        // a0=synth, a1=voice, a2=wavetable
-        gpr wt = ctx->r6;
-        int32_t wt_ptr = (int32_t)wt;
-        int32_t wbase = 0, wlen = 0;
-        uint8_t wtype = 0;
-        if (wt_ptr != 0) { wbase = MEM_W(0x00, wt); wlen = MEM_W(0x04, wt); wtype = MEM_BU(0x08, wt); }
-        int32_t pv = MEM_W(0x08, ctx->r5);
-        fprintf(stderr, "[SYN-START #%d] synth=0x%08X voice=0x%08X(pv=0x%08X) wt=0x%08X base=0x%08X len=%d type=%d\n",
-            _syn_start_calls, (int32_t)ctx->r4, (int32_t)ctx->r5, pv, wt_ptr, wbase, wlen, wtype);
-        fflush(stderr);
-    }
     // 0x800C9C50: addiu       $sp, $sp, -0x18
     ctx->r29 = ADD32(ctx->r29, -0X18);
     // 0x800C9C54: sw          $ra, 0x14($sp)
@@ -4658,30 +4640,6 @@ L_800CBA98:
 RECOMP_FUNC void alLoadParam(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
-    _load_param_calls++;
-    {
-        int32_t paramID = (int32_t)ctx->r5;
-        if (paramID == 5 && _load_param_calls <= 3) { // AL_FILTER_SET_WAVETABLE
-            gpr wt = ctx->r6;
-            int32_t wt_ptr = (int32_t)wt;
-            int32_t wbase = 0, wlen = 0;
-            uint8_t wtype = 0;
-            int32_t wbook = 0, wloop = 0;
-            if (wt_ptr != 0) {
-                wbase = MEM_W(0x00, wt);
-                wlen = MEM_W(0x04, wt);
-                wtype = MEM_BU(0x08, wt);
-                wloop = MEM_W(0x0C, wt);
-                wbook = MEM_W(0x10, wt);
-            }
-            fprintf(stderr, "[LOADPARAM SET_WT #%d] filter=0x%08X wt=0x%08X base=0x%08X len=%d type=%d loop=0x%08X book=0x%08X\n",
-                _load_param_calls, (int32_t)ctx->r4, wt_ptr, wbase, wlen, wtype, wloop, wbook);
-            fflush(stderr);
-        } else if (paramID == 4 && _load_param_calls <= 3) { // AL_FILTER_RESET
-            fprintf(stderr, "[LOADPARAM RESET #%d] filter=0x%08X\n", _load_param_calls, (int32_t)ctx->r4);
-            fflush(stderr);
-        }
-    }
     // 0x800CBAA0: addiu       $sp, $sp, -0x18
     ctx->r29 = ADD32(ctx->r29, -0X18);
     // 0x800CBAA4: addiu       $at, $zero, 0x4
@@ -5792,27 +5750,6 @@ L_800CC0D8:
 RECOMP_FUNC void alAdpcmPull(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
-    _adpcm_pull_calls++;
-    if (_adpcm_pull_calls <= 3 || (_adpcm_pull_calls % 2000) == 0) {
-        // a0=filter, a2=outCount
-        gpr filt = ctx->r4;
-        int32_t outCount = (int32_t)ctx->r6;
-        int32_t tbl_ptr = MEM_W(0x28, filt);
-        int32_t memin_v = MEM_W(0x44, filt);
-        int32_t sample_v = MEM_W(0x38, filt);
-        int32_t lastsam_v = MEM_W(0x3C, filt);
-        int32_t loop_end_v = MEM_W(0x20, filt);
-        int32_t loop_count_v = MEM_W(0x24, filt);
-        int32_t tbl_base = 0, tbl_len = 0;
-        if (tbl_ptr != 0) {
-            gpr tn = (gpr)(int64_t)(int32_t)tbl_ptr;
-            tbl_base = MEM_W(0x00, tn);
-            tbl_len = MEM_W(0x04, tn);
-        }
-        fprintf(stderr, "[ADPCM #%d] out=%d tbl=0x%08X base=0x%08X len=%d memin=0x%08X sample=%d lastsam=%d loop_end=%d loop_cnt=%d\n",
-            _adpcm_pull_calls, outCount, tbl_ptr, tbl_base, tbl_len, memin_v, sample_v, lastsam_v, loop_end_v, loop_count_v);
-        fflush(stderr);
-    }
     // 0x800CC14C: addiu       $sp, $sp, -0xB0
     ctx->r29 = ADD32(ctx->r29, -0XB0);
     // 0x800CC150: sw          $s7, 0x44($sp)
@@ -7327,6 +7264,44 @@ L_800CCA6C:
     ctx->r2 = 0 | 0;
 ;}
 RECOMP_FUNC void alSavePull(uint8_t* rdram, recomp_context* ctx) {
+    // PATCHED: Pass through to inner pull chain, skip reverb save/load commands.
+    // Original stub returned without calling inner chain, causing cmdp=0 → audio corruption.
+    // Now we call the inner node's pull function and return its cmdList pointer,
+    // but skip writing the reverb SAVEBUFF/LOADBUFF commands that caused ALDelay crashes.
+    {
+        // Save caller state
+        gpr saved_sp = ctx->r29;
+        gpr saved_ra = ctx->r31;
+        gpr saved_a0 = ctx->r4;
+        gpr saved_a2 = ctx->r6;
+
+        // Allocate stack frame (matches original: sp -= 0x20)
+        ctx->r29 = ADD32(ctx->r29, -0x20);
+        MEM_W(0x1C, ctx->r29) = ctx->r31;  // save ra
+        MEM_W(0x20, ctx->r29) = ctx->r4;   // save a0
+        MEM_W(0x28, ctx->r29) = ctx->r6;   // save a2
+
+        // Follow the chain: a0 = [a0+0x0] (next node in pull chain)
+        ctx->r4 = MEM_W(ctx->r4, 0x0);
+
+        // Pass through stack arg (cmdList pointer) from caller
+        ctx->r15 = MEM_W(ctx->r29, 0x30);
+        MEM_W(0x10, ctx->r29) = ctx->r15;
+
+        // Load inner node's pull function pointer from [a0+0x4]
+        ctx->r25 = MEM_W(ctx->r4, 0x4);
+
+        // Call the inner pull function
+        LOOKUP_FUNC(ctx->r25)(rdram, ctx);
+
+        // v0 now has the updated cmdList pointer from the inner chain.
+        // Skip reverb commands — just return v0 as-is.
+
+        // Restore stack
+        ctx->r31 = MEM_W(ctx->r29, 0x1C);
+        ctx->r29 = ADD32(ctx->r29, 0x20);
+    }
+    return;
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
     // 0x800CCA74: addiu       $sp, $sp, -0x20

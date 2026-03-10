@@ -219,6 +219,18 @@ RspExitReason aspMain(uint8_t* rdram, [[maybe_unused]] uint32_t ucode_addr) {
     if (RSP_SIGNED(r27) <= 0) {
         return RspExitReason::Broke;
     }
+    // [PATCH] Cap data_size to a sane maximum. With the gAudioCmdLen fix in
+    // __amHandleFrameMsg, this should rarely fire. If it does, something is
+    // still wrong with the data_size computation.
+    if (r27 > 0x4000) {
+        static int cap_warn_count = 0;
+        if (cap_warn_count < 20) {
+            cap_warn_count++;
+            fprintf(stderr, "[ASP] WARNING: data_size=0x%X still too large (task#%d), capping to 0x4000\n", r27, asp_task_id);
+            fflush(stderr);
+        }
+        r27 = 0x4000;
+    }
     static uint32_t saved_data_size = 0;
     saved_data_size = r27;
     // Diagnostic: log ucode_data_size, dispatch table, and ENVMIXER params

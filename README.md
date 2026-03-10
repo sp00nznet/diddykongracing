@@ -7,14 +7,15 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Stable — boots through intro flyby, character select scenes, title screen, and menus
+- **Runtime**: Game loop running — boots through intro flyby, character select, title screen, and menus (~26 DLs/sec, 60Hz)
 - **Rendering**: All scenes right-side up (antipiracy viewport bypass, single-stage vertex transform)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
-- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
+- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline (garbage DL detection, code-space DL rejection)
 - **GUI**: ImGui overlay — menu bar (File/Config/About), settings window (F1), debug overlay (F2)
 - **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
-- **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled as workaround)
+- **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled)
+- **RDRAM**: 4GB allocation (all read/write), gzip pointer validation guards
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
 
 ### Rendering Pipeline
@@ -132,12 +133,24 @@ tracking/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```
 
+## Recent Fixes (2026-03-08)
+
+- **CRITICAL: alSavePull/alFxPull audio chain fix** — Stubs that returned early without calling the inner pull chain caused `cmdp=NULL`, leading to `data_size=2GB` and massive RDRAM corruption. alFxPull now calls inner chain with FX disabled; alSavePull passes through to inner chain skipping reverb commands.
+- **RSP task field offset fix** — Host `OSTask_s` has 8-byte pointers (x64) but N64 has 4-byte; fields like `ucode_data` were read at wrong offsets. Now reads at N64 byte offsets.
+- **aspMain data_size safety cap** — Caps audio data_size to 0x4000 as a last-resort guard against corruption.
+- **Gzip pointer validation** — `gzip_inflate`, `gzip_inflate_stored`, and `gzip_inflate_codes` now validate source/dest pointers are within 16MB KSEG0 range before decompression.
+- **Display list garbage detection** — f3ddkr bails after 5 consecutive unknown opcodes; rejects DLs pointing into code space (0x400–0xD8000).
+- **Crash handler** — Now reports RDRAM offset for access violations, aiding post-mortem debugging.
+- **Diagnostic cleanup** — Removed verbose per-call fprintf logging from audio functions (alAdpcmPull, alLoadParam, alSynStartVoice, etc.).
+
 ## Known Issues
 
-1. **Menu navigation crash**: Selecting menu items can cause visual corruption and crash
-2. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-3. **No save support**: Controller Pak functions return NOPACK (EEPROM saves work)
-4. **Rare logo washout**: Logo occasionally fades from crisp to washed out before menu
+1. **Menu navigation crash**: Selecting menu items (pressing A) crashes — `obj_update` dereferences garbage `gRacers` pointers
+2. **Graphical glitches**: Color changes between scenes, character flickering
+3. **Backface culling disabled**: Orientation confirmed correct but culling temporarily off
+4. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
+5. **No save support**: EEPROM 4k not yet implemented
+6. **Audio FX disabled**: Reverb (alFxPull) disabled via `if(0)` to avoid ALDelay crashes
 
 ## Credits
 

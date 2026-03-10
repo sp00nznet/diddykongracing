@@ -77,9 +77,17 @@ public:
 
     void send_dl(const OSTask* task) override {
         dl_count_++;
-        if (dl_count_ <= 20 || (dl_count_ <= 200 && dl_count_ % 50 == 0)) {
+        // Log more during scene transitions (every DL for first 20, then periodically)
+        if (dl_count_ <= 20 || (dl_count_ <= 200 && dl_count_ % 50 == 0) || dl_count_ % 500 == 0) {
             fprintf(stderr, "[DKR-GFX] send_dl #%d: data_ptr=0x%08X data_size=0x%08X\n",
                 dl_count_, task->t.data_ptr, task->t.data_size);
+            fflush(stderr);
+        }
+        // Log any DL with suspicious data_ptr (pointing into code space 0x80000400-0x800D8000)
+        uint32_t phys = task->t.data_ptr & 0x7FFFFF;
+        if (phys >= 0x400 && phys < 0x0D8000) {
+            fprintf(stderr, "[DKR-GFX] WARNING: send_dl #%d data_ptr=0x%08X points into code space!\n",
+                dl_count_, task->t.data_ptr);
             fflush(stderr);
         }
         f3ddkr_process_dl(rdram_, task->t.data_ptr, task->t.data_size);

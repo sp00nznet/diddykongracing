@@ -1,7 +1,5 @@
 #include "recomp.h"
 #include "funcs.h"
-#include <stdio.h>
-static int _decode_chunk_calls = 0;
 
 RECOMP_FUNC void _Genld(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -4148,27 +4146,6 @@ L_800CBA98:
 RECOMP_FUNC void static_0_800CC020(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
-    _decode_chunk_calls++;
-    if (_decode_chunk_calls <= 3 || (_decode_chunk_calls % 2000) == 0) {
-        extern
-#ifdef __cplusplus
-        "C"
-#endif
-        int g_asp_task_id;
-        // s1=r17=nbytes, s2=r18=filter, s3=r19=inp, s4=r20=flags, s5=r21=outp, s6=r22=tsam, s0=r16=cmd_ptr
-        int32_t nbytes_v = (int32_t)ctx->r17;
-        int32_t filter_v = (int32_t)ctx->r18;
-        int32_t inp_v = (int32_t)(int16_t)ctx->r19;
-        int32_t flags_v = (int32_t)ctx->r20;
-        int32_t outp_v = (int32_t)(int16_t)ctx->r21;
-        int32_t tsam_v = (int32_t)ctx->r22;
-        int32_t cmd_ptr_v = (int32_t)ctx->r16;
-        int32_t dma_func_v = 0;
-        if (filter_v != 0) dma_func_v = MEM_W(0x30, ctx->r18);
-        fprintf(stderr, "[DCHUNK #%d] (after asp_task=%d) nbytes=%d tsam=%d inp=%d outp=%d flags=0x%X cmd=0x%08X dma=0x%08X filter=0x%08X\n",
-            _decode_chunk_calls, g_asp_task_id, nbytes_v, tsam_v, inp_v, outp_v, flags_v, cmd_ptr_v, dma_func_v, filter_v);
-        fflush(stderr);
-    }
     // 0x800CC020: addiu       $sp, $sp, -0x18
     ctx->r29 = ADD32(ctx->r29, -0X18);
     // 0x800CC024: sw          $s3, 0x2C($sp)
@@ -4324,17 +4301,6 @@ L_800CC0D8:
     ctx->r15 = ctx->r25 & ctx->r1;
     // 0x800CC130: sw          $t7, 0x4($a0)
     MEM_W(0X4, ctx->r4) = ctx->r15;
-    // [DIAG] Verify ADPCM command was written correctly
-    if (_decode_chunk_calls <= 3) {
-        int32_t adpcm_addr = (int32_t)ctx->r4;
-        int32_t adpcm_w0 = MEM_W(0x0, ctx->r4);
-        int32_t adpcm_w1 = MEM_W(0x4, ctx->r4);
-        int32_t adpcm_op = (adpcm_w0 >> 24) & 0xFF;
-        fprintf(stderr, "[DCHUNK #%d] ADPCM cmd at 0x%08X: w0=0x%08X w1=0x%08X op=%d ret_cmdp=0x%08X\n",
-            _decode_chunk_calls, adpcm_addr, adpcm_w0, adpcm_w1, adpcm_op,
-            (int32_t)ADD32(ADD32(ctx->r16, 0X8), 0X0));
-        fflush(stderr);
-    }
     // 0x800CC134: sw          $zero, 0x40($s2)
     MEM_W(0X40, ctx->r18) = 0;
     // 0x800CC138: lw          $ra, 0x14($sp)

@@ -1,5 +1,6 @@
 #include "recomp.h"
 #include "funcs.h"
+#include <stdio.h>
 
 RECOMP_FUNC void music_jingle_pan_set(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;

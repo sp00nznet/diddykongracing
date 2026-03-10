@@ -1,5 +1,6 @@
 #include "recomp.h"
 #include "funcs.h"
+#include <stdio.h>
 
 RECOMP_FUNC void free_game_text_table(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -8011,6 +8012,25 @@ RECOMP_FUNC void gzip_size_uncompressed(uint8_t* rdram, recomp_context* ctx) {
 RECOMP_FUNC void gzip_inflate(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
+    // PATCHED: Validate source and dest pointers before decompression.
+    // Both must be within valid N64 KSEG0 range (0x80000000-0x80FFFFFF = 16MB).
+    // If corrupted (e.g., pointer overflow to KSEG1 range), skip decompression.
+    {
+        uint32_t src32 = (uint32_t)ctx->r4;
+        uint32_t dst32 = (uint32_t)ctx->r5;
+        if (src32 < 0x80000000u || src32 >= 0x81000000u ||
+            dst32 < 0x80000000u || dst32 >= 0x81000000u) {
+            static int gzip_warn_count = 0;
+            if (gzip_warn_count < 10) {
+                fprintf(stderr, "[GZIP] WARN #%d: bad pointers src=0x%08X dst=0x%08X, skipping decompression\n",
+                    ++gzip_warn_count, src32, dst32);
+                fflush(stderr);
+            }
+            // Return dest pointer in v0 (normal return value)
+            ctx->r2 = ctx->r5;
+            return;
+        }
+    }
     // 0x800C6778: addiu       $t6, $a0, 0x5
     ctx->r14 = ADD32(ctx->r4, 0X5);
     // 0x800C677C: lui         $at, 0x800E

@@ -1,5 +1,6 @@
 #include "recomp.h"
 #include "funcs.h"
+#include <stdio.h>
 
 RECOMP_FUNC void gzip_huft_build(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
@@ -2133,6 +2134,25 @@ RECOMP_FUNC void gzip_inflate_stored(uint8_t* rdram, recomp_context* ctx) {
     ctx->r13 = MEM_W(ctx->r13, -0X4F6C);
     // 0x800C749C: lui         $t4, 0x8013
     ctx->r12 = S32(0X8013 << 16);
+    // PATCHED: Validate gzip source pointer (loaded from global 0x800E3CF8)
+    // before the copy loop. If source has drifted out of valid 16MB RDRAM,
+    // abort this stored block to prevent access violation.
+    {
+        // Source pointer will be loaded into r15 at line +8 below, but we can
+        // pre-read it from the same global:
+        uint32_t src_check = (uint32_t)MEM_W(S32(0X800E << 16), 0X3CF8);
+        uint32_t dst_check = (uint32_t)MEM_W(S32(0X800E << 16), 0X3CFC);
+        if (src_check < 0x80000000u || src_check >= 0x81000000u ||
+            dst_check < 0x80000000u || dst_check >= 0x81000000u) {
+            static int stored_warn_count = 0;
+            if (stored_warn_count < 10) {
+                fprintf(stderr, "[GZIP-STORED] WARN #%d: bad ptrs src=0x%08X dst=0x%08X, aborting block\n",
+                    ++stored_warn_count, src_check, dst_check);
+                fflush(stderr);
+            }
+            return;
+        }
+    }
     // 0x800C74A0: lw          $t4, -0x4F70($t4)
     ctx->r12 = MEM_W(ctx->r12, -0X4F70);
     // 0x800C74A4: andi        $t0, $t5, 0x7
@@ -2306,6 +2326,21 @@ L_800C757C:
 RECOMP_FUNC void gzip_inflate_codes(uint8_t* rdram, recomp_context* ctx) {
     uint64_t hi = 0, lo = 0, result = 0;
     int c1cs = 0;
+    // PATCHED: Validate gzip source/dest pointers before Huffman decode loop
+    {
+        uint32_t src_check = (uint32_t)MEM_W(S32(0X800E << 16), 0X3CF8);
+        uint32_t dst_check = (uint32_t)MEM_W(S32(0X800E << 16), 0X3CFC);
+        if (src_check < 0x80000000u || src_check >= 0x81000000u ||
+            dst_check < 0x80000000u || dst_check >= 0x81000000u) {
+            static int codes_warn_count = 0;
+            if (codes_warn_count < 10) {
+                fprintf(stderr, "[GZIP-CODES] WARN #%d: bad ptrs src=0x%08X dst=0x%08X, aborting\n",
+                    ++codes_warn_count, src_check, dst_check);
+                fflush(stderr);
+            }
+            return;
+        }
+    }
     // 0x800C75A0: addiu       $sp, $sp, -0x10
     ctx->r29 = ADD32(ctx->r29, -0X10);
     // 0x800C75A4: lui         $t3, 0x800F
