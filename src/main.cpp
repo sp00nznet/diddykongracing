@@ -97,12 +97,9 @@ static void state_log_poll() {
     // One-time env check
     if (!state_log_checked) {
         state_log_checked = true;
-        const char* env = getenv("DKR_STATE_LOG");
-        state_log_enabled = (env && env[0] == '1');
-        if (state_log_enabled) {
-            fprintf(stderr, "[STATE] State logger enabled (%d entries)\n", NUM_STATE_ENTRIES);
-            fflush(stderr);
-        }
+        state_log_enabled = true;
+        fprintf(stderr, "[STATE] State logger enabled (%d entries)\n", NUM_STATE_ENTRIES);
+        fflush(stderr);
     }
     if (!state_log_enabled) return;
 
@@ -302,27 +299,12 @@ void poll_input() {
     }
 }
 
-// Auto-advance: simulate Start/A presses to get past boot screens
-static uint32_t input_start_ticks = 0;
-
 bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
     if (controller_num != 0) return false;
 
     *buttons = 0;
     *x = 0.0f;
     *y = 0.0f;
-
-    // Auto-press Start/A to advance past boot screens
-    // DKR boot: Nintendo logo (~3s) → Rareware logo (~3s) → title screen (needs Start)
-    if (input_start_ticks == 0) input_start_ticks = SDL_GetTicks();
-    uint32_t elapsed_ms = SDL_GetTicks() - input_start_ticks;
-    auto auto_press = [&](uint32_t at_ms, uint16_t btn) {
-        if (elapsed_ms >= at_ms && elapsed_ms < at_ms + 200) *buttons |= btn;
-    };
-    // Auto-input disabled for debugging. Use keyboard/gamepad to navigate.
-    // auto_press(4000, 0x1000);  // Start at 4s (skip Nintendo logo)
-    // auto_press(8000, 0x1000);  // Start at 8s (skip Rareware logo)
-    // auto_press(12000, 0x1000); // Start at 12s (advance title screen)
 
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
 
@@ -548,6 +530,12 @@ static LONG WINAPI crash_handler(EXCEPTION_POINTERS* ep) {
             CRASH_LOG("[DKR] RDRAM offset: 0x%llX (%lld bytes, ~%lldMB)\n",
                 (unsigned long long)rdram_offset, (long long)rdram_offset,
                 (long long)(rdram_offset / (1024*1024)));
+            // Check page protection at the faulting address
+            MEMORY_BASIC_INFORMATION mbi;
+            if (VirtualQuery((void*)fault_addr, &mbi, sizeof(mbi))) {
+                CRASH_LOG("[DKR] Page state: BaseAddr=%p, Size=0x%llX, State=0x%lX, Protect=0x%lX\n",
+                    mbi.BaseAddress, (unsigned long long)mbi.RegionSize, mbi.State, mbi.Protect);
+            }
         }
     }
 
@@ -776,15 +764,10 @@ int main(int argc, char* argv[]) {
     config.events_callbacks = events_cbs;
     config.error_handling_callbacks = error_cbs;
     config.threads_callbacks = thread_cbs;
-    // Don't requeue SI/AI/VI messages when their queues are full - dropping them
-    // is fine (the game handles missed messages) and prevents the idle thread from
-    // getting stuck in an infinite requeue loop that starves SP/DP/VIDEO delivery.
-    // The root cause: SI (controller) messages arrive every frame, the SI queue fills
-    // up, and with requeue=true the failed messages cycle forever in the external
-    // queue, preventing VIDEO_MSG from reaching the scheduler.
+    // Don't requeue SI messages — they accumulate and starve SP/DP delivery.
+    // DKR's input read uses OS_MESG_NOBLOCK on osRecvMesg, so lost SI is fine.
+    // VI requeue stays at default (false) — DKR handles missed VI retraces.
     config.message_queue_control.requeue_si = false;
-    config.message_queue_control.requeue_ai = false;
-    config.message_queue_control.requeue_vi = false;
 
     recomp::start(config);
 
