@@ -7,11 +7,11 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Game loop running — boots through intro flyby, character select, title screen, and menus (~26 DLs/sec, 60Hz)
+- **Runtime**: Game boots and runs — logo screens, title screen, character select, adventure mode intro all functional
 - **Rendering**: All scenes right-side up (antipiracy viewport bypass, single-stage vertex transform)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
 - **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
-- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline (garbage DL detection, code-space DL rejection)
+- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
 - **GUI**: ImGui overlay — menu bar (File/Config/About), settings window (F1), debug overlay (F2)
 - **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
 - **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled)
@@ -31,6 +31,9 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 - **Triangles**: Scanline rasterizer with Z-buffer, scissor clipping
 - **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
 - **Fill rect**: Fill/1-cycle/2-cycle modes
+
+### Task Execution
+- **Synchronous on game thread**: Both GFX and audio RSP tasks run synchronously on the game thread, with SP_COMPLETE and DP_COMPLETE messages sent directly via `osSendMesg` (blocking). This eliminates the external message queue deadlock that occurred when the gfx thread's completion signals couldn't reach the scheduler.
 
 ### GUI (ImGui)
 - **Menu bar**: File (Quit), Config (Settings), About (Help)
@@ -133,20 +136,17 @@ tracking/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```
 
-## Recent Fixes (2026-03-08)
+## Recent Fixes (2026-03-10)
 
-- **CRITICAL: alSavePull/alFxPull audio chain fix** — Stubs that returned early without calling the inner pull chain caused `cmdp=NULL`, leading to `data_size=2GB` and massive RDRAM corruption. alFxPull now calls inner chain with FX disabled; alSavePull passes through to inner chain skipping reverb commands.
-- **RSP task field offset fix** — Host `OSTask_s` has 8-byte pointers (x64) but N64 has 4-byte; fields like `ucode_data` were read at wrong offsets. Now reads at N64 byte offsets.
-- **aspMain data_size safety cap** — Caps audio data_size to 0x4000 as a last-resort guard against corruption.
-- **Gzip pointer validation** — `gzip_inflate`, `gzip_inflate_stored`, and `gzip_inflate_codes` now validate source/dest pointers are within 16MB KSEG0 range before decompression.
-- **Display list garbage detection** — f3ddkr bails after 5 consecutive unknown opcodes; rejects DLs pointing into code space (0x400–0xD8000).
-- **Crash handler** — Now reports RDRAM offset for access violations, aiding post-mortem debugging.
-- **Diagnostic cleanup** — Removed verbose per-call fprintf logging from audio functions (alAdpcmPull, alLoadParam, alSynStartVoice, etc.).
+- **Synchronous GFX task execution** — GFX tasks now run on the game thread instead of the gfx thread. SP_COMPLETE and DP_COMPLETE sent via blocking `osSendMesg`, eliminating the external message queue deadlock that caused the game to freeze after a few frames.
+- **Black frame flashing fix** — VI interrupt handler no longer presents blank black frames when VI registers are transitioning, eliminating periodic screen flashing.
+- **Auto-advance removed** — Removed auto-input that simulated Start/A presses during boot. Was causing endless pause loops and mis-selections during gameplay.
+- **OS_MESG_BLOCK for task completion** — SP/DP complete messages use blocking sends to prevent silent drops when the scheduler's queue is full.
 
 ## Known Issues
 
-1. **Menu navigation crash**: Selecting menu items (pressing A) crashes — `obj_update` dereferences garbage `gRacers` pointers
-2. **Graphical glitches**: Color changes between scenes, character flickering
+1. **Crash during adventure mode intro**: Game freezes/crashes when entering adventure mode — DL submission stops, likely related to audio task processing or scheduler starvation during scene transitions
+2. **Graphical glitches**: Some black areas where polygons should render, texture bleeding on 3D models
 3. **Backface culling disabled**: Orientation confirmed correct but culling temporarily off
 4. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
 5. **No save support**: EEPROM 4k not yet implemented

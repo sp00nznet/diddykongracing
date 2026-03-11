@@ -131,8 +131,8 @@ public:
         // 0 = blank, 2 = 16-bit (RGBA5551), 3 = 32-bit (RGBA8888)
         uint32_t pixel_size = vi_status & 0x3;
         if (pixel_size < 2 || vi_origin == 0 || vi_width == 0) {
-            // Still present the frame (for ImGui overlay on blank frames)
-            present_frame(0, 0);
+            // No valid framebuffer — skip this VI interrupt entirely.
+            // Presenting black here causes visible flashing.
             return;
         }
 
