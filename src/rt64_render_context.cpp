@@ -136,6 +136,14 @@ public:
             return;
         }
 
+        // Skip presentation while actively rendering to avoid tearing
+        if (f3ddkr_is_rendering()) {
+            if (fb_texture_) {
+                present_frame(fb_texture_width_, fb_texture_height_);
+            }
+            return;
+        }
+
         // Calculate display dimensions from VI registers
         uint32_t v_start = (vi_v_start >> 16) & 0x3FF;
         uint32_t v_end = vi_v_start & 0x3FF;

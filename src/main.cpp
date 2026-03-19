@@ -87,6 +87,7 @@ static StateEntry state_entries[] = {
     { "gControllerBtnPress",  0x801216C0, 2, 0, false },
     { "gIsLoading",           0x80123A94, 4, 0, false },
     { "gBgloadActive",        0x800E3D00, 4, 0, false },
+    { "gCutsceneCamActive",   0x80121294, 1, 0, false },
 };
 static constexpr int NUM_STATE_ENTRIES = sizeof(state_entries) / sizeof(state_entries[0]);
 
@@ -139,6 +140,19 @@ static void state_log_poll() {
             fflush(stderr);
             e.prev = cur;
         }
+    }
+
+    // Auto-skip cinematics (MENU_NEWGAME_CINEMATIC = 23) to avoid threading deadlock.
+    // The cinematic waits for func_800214C4() which returns D_8011AD22[1 - D_8011AD21].
+    // Force both slots to 1 so the cinematic always thinks it completed.
+    // gCurrentMenuId at 0x800DF9F0, D_8011AD22 at 0x8011B2A2 (2 bytes)
+    uint32_t menuId = state_read_u32(rdram, 0x800DF9F0);
+    if (menuId == 23) {
+        // Write 1 to D_8011AD22[0] and D_8011AD22[1] (byte access with XOR 3)
+        uint32_t phys0 = (0x8011B2A2 - 0x80000000u) & 0x7FFFFFu;
+        uint32_t phys1 = (0x8011B2A3 - 0x80000000u) & 0x7FFFFFu;
+        rdram[phys0 ^ 3] = 1;
+        rdram[phys1 ^ 3] = 1;
     }
 }
 
@@ -353,6 +367,15 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
 
     *x = analog_x;
     *y = analog_y;
+
+    // Log analog stick values when non-zero (first 10 times)
+    static int stick_log = 0;
+    if ((analog_x != 0.0f || analog_y != 0.0f) && stick_log < 10) {
+        fprintf(stderr, "[INPUT] stick: x=%.2f y=%.2f buttons=0x%04X\n", analog_x, analog_y, *buttons);
+        fflush(stderr);
+        stick_log++;
+    }
+
     return true;
 }
 
@@ -401,7 +424,7 @@ void* create_gfx() {
     sdl_window = SDL_CreateWindow(
         "Diddy Kong Racing Recompiled",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        1280, 960,
+        640, 480,
         SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI
     );
     return sdl_window;
@@ -698,6 +721,25 @@ int main(int argc, char* argv[]) {
         fprintf(stderr, "[DKR] RDRAM base: 0x%p\n", rdram);
         fprintf(stderr, "[DKR] r29(SP): 0x%llX, r8: 0x%llX\n",
             (unsigned long long)ctx->r29, (unsigned long long)ctx->r8);
+
+        // ---- Anti-tamper / DRM bypass ----
+        // The retail ROM has three IO_READ-based DRM checks that read N64 hardware
+        // registers (SP DMEM, SP IMEM, PIF RAM) via MEM_W. In the recomp these map
+        // to offsets in the RDRAM array. Write the expected values so the checks pass.
+        //
+        // 1. drm_validate_dmem: IO_READ(SP_DMEM_START=0x04000000) expects 0xFFFFFFFF
+        //    MEM_W at KSEG1 0xA4000000 → RDRAM offset 0x24000000
+        *(uint32_t*)(rdram + 0x24000000) = 0xFFFFFFFF;
+        //
+        // 2. drm_validate_imem: IO_READ(SP_IMEM_START=0x04001000) expects CIC_ID 0x17D7
+        //    MEM_W at KSEG1 0xA4001000 → RDRAM offset 0x24001000
+        *(uint32_t*)(rdram + 0x24001000) = 0x000017D7;
+        //
+        // 3. render_scene anti-tamper: IO_READ(0x200) expects 0xAC290000
+        //    MEM_W at KSEG1 0xA0000200 → RDRAM offset 0x20000200
+        *(uint32_t*)(rdram + 0x20000200) = 0xAC290000;
+
+        fprintf(stderr, "[DKR] Anti-tamper bypass: SP_DMEM, SP_IMEM, PIF values written\n");
         fflush(stderr);
     };
 

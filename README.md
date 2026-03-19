@@ -7,37 +7,49 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 ## Status
 
 - **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Game boots and runs — logo screens, title screen, character select, adventure mode intro all functional
+- **Runtime**: Adventure mode overworld reached — full boot chain, menus, character select, cinematics, hub world
 - **Rendering**: All scenes right-side up (antipiracy viewport bypass, single-stage vertex transform)
 - **Functions**: 1956 recompiled functions + aspMain RSP microcode
-- **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered)
+- **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered), default 2x window scale
 - **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
 - **GUI**: ImGui overlay — menu bar (File/Config/About), settings window (F1), debug overlay (F2)
-- **Input**: Keyboard and Xbox-style gamepad supported (SDL2 GameController API)
+- **Input**: Keyboard (WASD=analog stick, arrows=D-pad) and Xbox-style gamepad supported (SDL2 GameController API)
 - **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled)
+- **Saves**: EEPROM 4K implemented (N64ModernRuntime built-in, saves to AppData)
 - **RDRAM**: 4GB allocation (all read/write), gzip pointer validation guards
 - **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
+
+### Anti-tamper / DRM Bypass (2026-03-18)
+The retail ROM has three `IO_READ`-based DRM checks that read N64 hardware registers (SP DMEM, SP IMEM, PIF RAM). In the recomp these map to uninitialized RDRAM offsets, causing all three to fail:
+- **`drm_validate_dmem`**: Reads SP_DMEM[0] — when it fails, `gDmemInvalid=TRUE` causes a 10 million iteration busy loop every frame
+- **`drm_validate_imem`**: Reads SP_IMEM[0] for CIC_ID — when it fails, `sAntiPiracyTriggered=TRUE` forces START button every frame during gameplay (instant pause)
+- **`render_scene` anti-tamper**: Reads PIF_RAM[0x200] — when it fails, all tracks are mirrored
+
+All three bypassed by writing expected values to RDRAM in `on_init_callback`.
 
 ### Rendering Pipeline
 - **Antipiracy bypass**: DKR checks ROM integrity at boot — recompiled binary triggers the check, flipping the viewport. Bypassed by forcing `gAntiPiracyViewport = FALSE` in RDRAM
 - **Single-stage vertex transform**: Decomp-confirmed — no two-stage multiply in f3ddkr RSP; game pre-combines MVP matrices
 - **Viewport Y-flip**: N64 positive vscale_y negated for correct software rasterizer orientation
+- **Near-plane clipping**: Vertices with w <= 0.1 rejected, screen coords clamped to ±2048, oversized triangles rejected
 - **Color combiner**: N64 (A-B)*C+D formula, 1-cycle and 2-cycle modes
 - **RDP blender**: Full (P*A + M*B)/(A+B) formula with FORCE_BL support
 - **Distance fog**: Per-vertex fog computation via RSP HLE (G_FOG geometry mode)
+- **Z-buffer**: Depth test with proper fallback (returns max depth when no z-buffer set)
 - **Alpha blending**: Framebuffer read-modify-write with configurable blend modes
 - **Alpha test**: Transparent pixels correctly skipped
 - **TEXRECT**: Textured rectangles in copy and combiner modes
 - **Triangles**: Scanline rasterizer with Z-buffer, scissor clipping
 - **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
 - **Fill rect**: Fill/1-cycle/2-cycle modes
+- **Render guard**: Re-presents last good frame while f3ddkr is actively rendering to prevent tearing
 
 ### Task Execution
 - **Synchronous on game thread**: Both GFX and audio RSP tasks run synchronously on the game thread, with SP_COMPLETE and DP_COMPLETE messages sent directly via `osSendMesg` (blocking). This eliminates the external message queue deadlock that occurred when the gfx thread's completion signals couldn't reach the scheduler.
 
 ### GUI (ImGui)
 - **Menu bar**: File (Quit), Config (Settings), About (Help)
-- **Settings window** (F1): General (ROM file selector), Display, Input, Audio tabs
+- **Settings window** (F1): General (ROM file selector), Display (window scale 1x-4x), Input, Audio tabs
 - **Debug overlay** (F2): FPS graph, display info
 - **Help window**: Project info, repository link, credits
 - **Theme**: xemu-inspired dark green
@@ -63,10 +75,11 @@ Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 usin
 ### Controls
 | Key | N64 Button | | Key | N64 Button |
 |-----|------------|-|-----|------------|
-| Return/Space | A | | Q | L Trigger |
-| LShift | B | | E | R Trigger |
-| Z | Z Trigger | | I/K/J/L | C-Up/Down/Left/Right |
-| Escape | Start | | Arrows | D-Pad |
+| W/A/S/D | Analog Stick | | Q | L Trigger |
+| Return/Space | A | | E | R Trigger |
+| LShift | B | | I/K/J/L | C-Up/Down/Left/Right |
+| Z | Z Trigger | | Arrows | D-Pad |
+| Escape | Start | | | |
 
 Xbox-style gamepads are also supported:
 | Gamepad | N64 Button | | Gamepad | N64 Button |
@@ -136,21 +149,26 @@ tracking/
     N64ModernRuntime/     # ultramodern + librecomp runtime
 ```
 
-## Recent Fixes (2026-03-10)
+## Recent Fixes (2026-03-18)
 
-- **Synchronous GFX task execution** — GFX tasks now run on the game thread instead of the gfx thread. SP_COMPLETE and DP_COMPLETE sent via blocking `osSendMesg`, eliminating the external message queue deadlock that caused the game to freeze after a few frames.
-- **Black frame flashing fix** — VI interrupt handler no longer presents blank black frames when VI registers are transitioning, eliminating periodic screen flashing.
-- **Auto-advance removed** — Removed auto-input that simulated Start/A presses during boot. Was causing endless pause loops and mis-selections during gameplay.
-- **OS_MESG_BLOCK for task completion** — SP/DP complete messages use blocking sends to prevent silent drops when the scheduler's queue is full.
+- **Anti-tamper DRM bypass** — Three IO_READ-based DRM checks bypassed by writing expected values to RDRAM. This was the ROOT CAUSE of the adventure mode freeze (gDmemInvalid busy loop + sAntiPiracyTriggered forced START).
+- **Cinematic auto-skip** — MENU_NEWGAME_CINEMATIC (menu 23) auto-completes to avoid threading deadlock in fb_update/osRecvMesg during cutscene playback.
+- **Z-buffer depth fix** — `read_zbuf()` returns max depth (0xFFFF) when no z-buffer is set, preventing all pixels from failing depth test.
+- **Near-plane clipping** — Tighter near-plane threshold (w > 0.1), screen coord clamping (±2048), and oversized triangle rejection prevent ground-shattering artifacts.
+- **Render-during-present guard** — Re-presents last good frame while f3ddkr is actively rendering to prevent tearing.
+- **Window scaling** — Default 2x (640x480), dynamically changeable via F1 → Display tab.
+- **Missing function diagnostics** — Logs caller ra/r4/r5 for NULL function pointer calls.
 
 ## Known Issues
 
-1. **Crash during adventure mode intro**: Game freezes/crashes when entering adventure mode — DL submission stops, likely related to audio task processing or scheduler starvation during scene transitions
-2. **Graphical glitches**: Some black areas where polygons should render, texture bleeding on 3D models
-3. **Backface culling disabled**: Orientation confirmed correct but culling temporarily off
-4. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-5. **No save support**: EEPROM 4k not yet implemented
-6. **Audio FX disabled**: Reverb (alFxPull) disabled via `if(0)` to avoid ALDelay crashes
+1. **Intermittent crashes**: Thread scheduler race conditions can crash during scene transitions (run_next_thread accessing corrupted thread contexts)
+2. **Graphical glitches**: Ground geometry corruption near camera (near-plane clipping artifacts), some texture bleeding, missing polygons
+3. **Backface culling disabled**: DKR's default geometry mode and winding convention need verification
+4. **NPC dialogue stuck**: Taj "switch vehicle" dialogue doesn't exit properly
+5. **Movement in overworld**: Requires WASD (analog stick), arrow keys are D-pad only
+6. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
+7. **Audio FX disabled**: Reverb (alFxPull) disabled via `if(0)` to avoid ALDelay crashes
+8. **Some flashing during scene transitions**: Framebuffer alternation visible during level loads
 
 ## Credits
 
