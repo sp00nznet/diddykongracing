@@ -102,6 +102,9 @@
 #define G_BL_0        3   // 0
 
 // --- Geometry mode flags ---
+#define G_CULL_FRONT  0x00001000
+#define G_CULL_BACK   0x00002000
+#define G_CULL_BOTH   0x00003000
 #define G_FOG         0x00010000
 
 // --- Texture format/size ---
@@ -264,5 +267,11 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size);
 // Returns the physical address of the color image, or 0 if nothing rendered yet
 uint32_t f3ddkr_get_last_ci_addr();
 uint16_t f3ddkr_get_last_ci_width();
+
+// Returns true while f3ddkr is actively rendering a display list (race guard)
+bool f3ddkr_is_rendering();
+
+// Returns true if the given physical framebuffer address has been fully rendered
+bool f3ddkr_is_completed_fb(uint32_t phys_addr);
 
 #endif // F3DDKR_H

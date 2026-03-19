@@ -10,6 +10,11 @@
 // ============================================================
 static F3DDKRState g_state;
 static bool g_initialized = false;
+static volatile bool g_rendering = false; // True while processing a display list
+
+// Track completed framebuffers — only present these to avoid flashing
+static volatile uint32_t g_completed_fb[2] = {0, 0}; // Two framebuffer slots
+static volatile int g_completed_fb_count = 0;
 // Log first N occurrences of each opcode (then go silent)
 static constexpr int LOG_FIRST_N = 1;
 
@@ -467,7 +472,7 @@ static CombineInput run_color_combiner(const CombineInput& tex, const CombineInp
 // Z-buffer helpers
 // ============================================================
 static inline uint16_t read_zbuf(int x, int y) {
-    if (g_state.zi_addr == 0) return 0;
+    if (g_state.zi_addr == 0) return 0xFFFF; // No z-buffer → pass all depth tests
     uint32_t phys = g_state.zi_addr + ((uint32_t)y * g_state.ci_width + (uint32_t)x) * 2;
     return rdram_read_u16(g_state.rdram, phys);
 }
@@ -679,10 +684,14 @@ static void cmd_vtx(uint32_t w0, uint32_t w1) {
         }
 
         // Perspective divide to screen space using N64 viewport transform
-        if (fabsf(tv.cw) > 0.0001f) {
+        if (tv.cw > 0.01f) {
             float inv_w = 1.0f / tv.cw;
             tv.sx = tv.cx * inv_w * g_state.vp_scale_x + g_state.vp_trans_x;
             tv.sy = tv.cy * inv_w * g_state.vp_scale_y + g_state.vp_trans_y;
+            // Clamp screen coords to prevent near-plane vertices from
+            // producing extreme values that shatter the rasterizer
+            tv.sx = std::clamp(tv.sx, -2048.0f, 2048.0f);
+            tv.sy = std::clamp(tv.sy, -2048.0f, 2048.0f);
         } else {
             tv.sx = 0;
             tv.sy = 0;
@@ -1284,12 +1293,29 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
 
         g_state.tri_total_count++;
 
-        // Skip if any vertex is behind camera (w <= 0)
-        if (v0.cw <= 0.001f || v1.cw <= 0.001f || v2.cw <= 0.001f) continue;
+        // Near-plane clipping: skip triangles with any vertex behind or too close to camera.
+        // Vertices with very small w produce extreme screen coords that shatter geometry.
+        if (v0.cw <= 0.1f || v1.cw <= 0.1f || v2.cw <= 0.1f) continue;
 
-        // Backface culling disabled — verify orientation first, then re-enable
-        // float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
-        // if (cross < 0) continue;
+        // Reject triangles that are entirely off-screen (all vertices outside bounds)
+        float min_sx = std::min({v0.sx, v1.sx, v2.sx});
+        float max_sx = std::max({v0.sx, v1.sx, v2.sx});
+        float min_sy = std::min({v0.sy, v1.sy, v2.sy});
+        float max_sy = std::max({v0.sy, v1.sy, v2.sy});
+        if (max_sx < -512 || min_sx > 832 || max_sy < -512 || min_sy > 752) continue;
+        // Reject extremely large triangles (near-plane artifacts)
+        if ((max_sx - min_sx) > 1024 || (max_sy - min_sy) > 1024) continue;
+
+        // Backface culling — disabled pending winding direction verification.
+        // DKR's F3DDKR microcode uses per-triangle flags (0x40 = draw both sides)
+        // and geometry mode (G_CULL_BACK/G_CULL_FRONT), but the default geometry
+        // mode and winding convention need to be confirmed before enabling.
+        // TODO: enable once DKR's default geometry mode is determined
+        // if (!(flags & TRI_BACKFACE_DRAW)) {
+        //     float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
+        //     if ((g_state.geometry_mode & G_CULL_BACK) && cross < 0) continue;
+        //     if ((g_state.geometry_mode & G_CULL_FRONT) && cross > 0) continue;
+        // }
 
         // UV coordinates from triangle struct (s10.5 fixed-point → s16)
         float u0 = 0, v0_tc = 0, u1 = 0, v1_tc = 0, u2 = 0, v2_tc = 0;
@@ -1827,7 +1853,19 @@ void f3ddkr_process_dl(uint8_t* rdram, uint32_t dl_addr, uint32_t dl_size) {
         return;
     }
 
+    g_rendering = true;
     process_dl_recursive(rdram, phys, 0);
+    g_rendering = false;
+
+    // Mark this framebuffer as fully rendered (safe to present)
+    if (g_state.ci_addr != 0) {
+        uint32_t fb = g_state.ci_addr;
+        // Store in completed list (two slots for double buffering)
+        if (g_completed_fb[0] != fb && g_completed_fb[1] != fb) {
+            g_completed_fb[g_completed_fb_count & 1] = fb;
+            g_completed_fb_count++;
+        }
+    }
 }
 
 uint32_t f3ddkr_get_last_ci_addr() {
@@ -1836,4 +1874,12 @@ uint32_t f3ddkr_get_last_ci_addr() {
 
 uint16_t f3ddkr_get_last_ci_width() {
     return g_state.ci_width;
+}
+
+bool f3ddkr_is_rendering() {
+    return g_rendering;
+}
+
+bool f3ddkr_is_completed_fb(uint32_t phys_addr) {
+    return phys_addr == g_completed_fb[0] || phys_addr == g_completed_fb[1];
 }

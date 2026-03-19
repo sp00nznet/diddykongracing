@@ -12,8 +12,9 @@
 #include <shlobj.h>
 #endif
 
-// Stored renderer reference for RenderDrawData
+// Stored renderer/window references
 static SDL_Renderer* g_renderer = nullptr;
+static SDL_Window* g_window = nullptr;
 
 // Quit callback
 static void (*g_quit_callback)() = nullptr;
@@ -36,7 +37,7 @@ static struct {
 
     // Display settings
     bool fullscreen = false;
-    int window_scale = 3;  // index: 0=1x, 1=2x, 2=3x, 3=4x
+    int window_scale = 1;  // index: 0=1x, 1=2x, 2=3x, 3=4x
 
     // Audio settings
     float master_volume = 1.0f;
@@ -211,7 +212,14 @@ static void draw_settings_window() {
         // Display tab
         if (ImGui::BeginTabItem("Display")) {
             const char* scales[] = { "1x (320x240)", "2x (640x480)", "3x (960x720)", "4x (1280x960)" };
+            int prev_scale = g_menu.window_scale;
             ImGui::Combo("Window Scale", &g_menu.window_scale, scales, 4);
+            if (g_menu.window_scale != prev_scale && g_window) {
+                int w = 320 * (g_menu.window_scale + 1);
+                int h = 240 * (g_menu.window_scale + 1);
+                SDL_SetWindowSize(g_window, w, h);
+                SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+            }
             ImGui::Checkbox("Fullscreen", &g_menu.fullscreen);
             ImGui::EndTabItem();
         }
@@ -354,6 +362,7 @@ int menu_gui_init(SDL_Window* window, SDL_Renderer* renderer) {
     apply_theme();
 
     g_renderer = renderer;
+    g_window = window;
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
 
