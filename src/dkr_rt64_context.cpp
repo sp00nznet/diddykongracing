@@ -144,34 +144,13 @@ public:
 
     void send_dl(const OSTask* task) override {
         if (!app_) return;
-        dl_count_++;
-        if (dl_count_ <= 10 || dl_count_ % 500 == 0) {
-            fprintf(stderr, "[DKR-RT64] send_dl #%d: ucode=0x%08X ucode_data=0x%08X data_ptr=0x%08X\n",
-                dl_count_, task->t.ucode, task->t.ucode_data, task->t.data_ptr);
-            fflush(stderr);
-        }
-        // Try RT64's interpreter. Stage 1: F3DDKR microcode hash won't match
-        // any known GBI in RT64's database, so loadUCodeGBI will log
-        // "Unable to find a matching GBI" and processDisplayLists will skip.
-        // That's the expected stage-1 behavior — we're just verifying the
-        // plumbing.
         app_->state->rsp->reset();
         app_->interpreter->loadUCodeGBI(task->t.ucode & 0x3FFFFFF, task->t.ucode_data & 0x3FFFFFF, true);
         app_->processDisplayLists(app_->core.RDRAM, task->t.data_ptr & 0x3FFFFFF, 0, true);
     }
 
     void update_screen() override {
-        if (!app_) return;
-        screen_count_++;
-        if (screen_count_ <= 5 || (screen_count_ % 120 == 0)) {
-            ultramodern::renderer::ViRegs* vi = ultramodern::renderer::get_vi_regs();
-            fprintf(stderr,
-                "[DKR-RT64] update_screen #%d VI_STATUS=0x%08X VI_ORIGIN=0x%08X VI_WIDTH=%u VI_V_START=0x%08X VI_X_SCALE=0x%X VI_Y_SCALE=0x%X\n",
-                screen_count_, vi->VI_STATUS_REG, vi->VI_ORIGIN_REG, vi->VI_WIDTH_REG,
-                vi->VI_V_START_REG, vi->VI_X_SCALE_REG, vi->VI_Y_SCALE_REG);
-            fflush(stderr);
-        }
-        app_->updateScreen();
+        if (app_) app_->updateScreen();
     }
 
     void shutdown() override {
@@ -194,8 +173,6 @@ public:
 private:
     uint8_t* rdram_ = nullptr;
     std::unique_ptr<RT64::Application> app_;
-    int dl_count_ = 0;
-    int screen_count_ = 0;
 };
 
 }  // namespace
