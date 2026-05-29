@@ -1,7 +1,9 @@
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -163,6 +165,33 @@ extern "C" void recomp_entrypoint(uint8_t* rdram, recomp_context* ctx);
 extern void register_overlays();
 std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_context(
     uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
+#ifdef DKR_USE_RT64
+std::unique_ptr<ultramodern::renderer::RendererContext> create_rt64_render_context_real(
+    uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode);
+#endif
+
+// Set in lib/N64ModernRuntime/librecomp/src/sp.cpp. When true, osSpTaskStartGo
+// routes GFX tasks through ultramodern::submit_rsp_task (gfx thread → RT64)
+// instead of running them synchronously through f3ddkr_process_dl (SW path).
+extern bool g_dkr_use_rt64_gfx_path;
+
+// Renderer selection: env var DKR_RENDERER=rt64 picks real RT64 when built
+// with DKR_USE_RT64. Anything else falls back to the software path.
+static std::unique_ptr<ultramodern::renderer::RendererContext> select_render_context(
+    uint8_t* rdram, ultramodern::renderer::WindowHandle window_handle, bool developer_mode) {
+#ifdef DKR_USE_RT64
+    const char* sel = std::getenv("DKR_RENDERER");
+    if (sel && std::string{sel} == "rt64") {
+        fprintf(stderr, "[DKR] Renderer: RT64 (env DKR_RENDERER=rt64)\n");
+        fflush(stderr);
+        g_dkr_use_rt64_gfx_path = true;
+        return create_rt64_render_context_real(rdram, window_handle, developer_mode);
+    }
+#endif
+    fprintf(stderr, "[DKR] Renderer: software\n");
+    fflush(stderr);
+    return create_rt64_render_context(rdram, window_handle, developer_mode);
+}
 
 // RSP microcode (C++ linkage - matches aspMain.cpp)
 RspExitReason aspMain(uint8_t* rdram, uint32_t ucode_addr);
@@ -352,17 +381,27 @@ bool get_input(int controller_num, uint16_t* buttons, float* x, float* y) {
         if (fabsf(cx) > fabsf(analog_x)) analog_x = cx;
         if (fabsf(cy) > fabsf(analog_y)) analog_y = cy;
 
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) *buttons |= 0x8000;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X)) *buttons |= 0x4000;
-        if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16384) *buttons |= 0x2000;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) *buttons |= 0x1000;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) *buttons |= 0x0800;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) *buttons |= 0x0400;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) *buttons |= 0x0200;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) *buttons |= 0x0100;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) *buttons |= 0x0020;
-        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) *buttons |= 0x0010;
-        if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384) *buttons |= 0x0010;
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_A)) *buttons |= 0x8000; // A
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_X)) *buttons |= 0x4000; // B
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_B)) *buttons |= 0x4000; // B (also)
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_Y)) *buttons |= 0x4000; // B (also)
+        if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16384) *buttons |= 0x2000; // Z
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) *buttons |= 0x1000; // Start
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) *buttons |= 0x0800; // D-Up
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) *buttons |= 0x0400; // D-Down
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) *buttons |= 0x0200; // D-Left
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) *buttons |= 0x0100; // D-Right
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_LEFTSHOULDER)) *buttons |= 0x0020; // L
+        if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_RIGHTSHOULDER)) *buttons |= 0x0010; // R
+        if (SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16384) *buttons |= 0x0010; // R
+
+        // Right stick → C-buttons
+        float rx = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
+        float ry = SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
+        if (ry < -0.5f) *buttons |= 0x0008; // C-Up
+        if (ry >  0.5f) *buttons |= 0x0004; // C-Down
+        if (rx < -0.5f) *buttons |= 0x0002; // C-Left
+        if (rx >  0.5f) *buttons |= 0x0001; // C-Right
     }
 
     *x = analog_x;
@@ -461,6 +500,27 @@ void show_message_box(const char* msg) {
 void vi_callback() {
     // Poll game state from RDRAM and log changes
     state_log_poll();
+
+    // Defang DKR's __scHandleRetrace stall-detection bomb. If sc->curRSPTask
+    // or sc->curRDPTask is non-null for >10 retraces, the original handler
+    // calls __osSpSetStatus(SP_SET_HALT) which kills audio/gfx output. We
+    // run tasks synchronously, so the counter rising past 10 only happens
+    // when SP_COMPLETE message delivery stutters — never a real stall.
+    // Borrowed from DinoRecomp patches/src/core/scheduler.c.
+    uint8_t* rdram = get_rdram_base();
+    if (rdram) {
+        // KSEG0 0x800DECD4/0x800DECD8 → RDRAM offset 0x000DECD4/0x000DECD8.
+        // Writing 0 (all-zero u32) is byte-order-agnostic.
+        *(uint32_t*)(rdram + 0x000DECD4) = 0;  // gCurRSPTaskCounter
+        *(uint32_t*)(rdram + 0x000DECD8) = 0;  // gCurRDPTaskCounter
+
+        // Re-stamp anti-tamper DRM values every frame in case the game
+        // reinitializes that region. on_init_callback writes were holding
+        // through adventure mode; this is a belt-and-suspenders fallback.
+        *(uint32_t*)(rdram + 0x24000000) = 0xFFFFFFFF;
+        *(uint32_t*)(rdram + 0x24001000) = 0x000017D7;
+        *(uint32_t*)(rdram + 0x20000200) = 0xAC290000;
+    }
 }
 
 void gfx_init_callback() {
@@ -755,7 +815,7 @@ int main(int argc, char* argv[]) {
     rsp_callbacks.get_rsp_microcode = get_rsp_microcode;
 
     ultramodern::renderer::callbacks_t renderer_callbacks{};
-    renderer_callbacks.create_render_context = create_rt64_render_context;
+    renderer_callbacks.create_render_context = select_render_context;
 
     ultramodern::audio_callbacks_t audio_cbs{};
     audio_cbs.queue_samples = queue_audio_samples;
