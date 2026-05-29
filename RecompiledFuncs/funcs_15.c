@@ -3480,10 +3480,11 @@ RECOMP_FUNC void alFxPull(uint8_t* rdram, recomp_context* ctx) {
     ctx->r15 = MEM_BU(ctx->r15, -0X2BE0);
     // 0x80063EC8: lw          $v1, 0x7C($sp)
     ctx->r3 = MEM_W(ctx->r29, 0X7C);
-    // PATCHED: Force-disable audio FX (reverb) to prevent ALDelay corruption crash.
-    // The delay line buffer overflows and corrupts d->rs in ALDelay structs.
+    // Re-enabled: audio FX (reverb). Safety guards in _loadOutputBuffer (d->rs
+    // pointer validation) and _loadBuffer (buffer wrap loop) prevent crashes from
+    // any delay line overflow that may occur.
     // Original: if (ctx->r15 != 0) — checks alFXEnabled
-    if (0) {
+    if (ctx->r15 != 0) {
         // 0x80063ED0: or          $s0, $v0, $zero
         ctx->r16 = ctx->r2 | 0;
             goto L_80063EDC;
