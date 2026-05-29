@@ -15,11 +15,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(SDL2)
 
-# RT64 renderer - disabled for now (f3ddkr microcode not supported)
-# Using software framebuffer display via SDL instead.
-# set(RT64_STATIC TRUE CACHE BOOL "Build RT64 as static library" FORCE)
-# set(RT64_SDL_WINDOW_VULKAN TRUE CACHE BOOL "SDL Vulkan window support" FORCE)
-# add_subdirectory(lib/rt64)
+# RT64 renderer — Stage 1 of the swap. F3DDKR microcode isn't in RT64's
+# GBI database yet, so DLs won't actually render. We're just validating
+# the build/plumbing; SW renderer remains the default fallback.
+option(DKR_USE_RT64 "Build with RT64 renderer (stage 1: init only, no DKR microcode support)" OFF)
+if (DKR_USE_RT64)
+    set(RT64_STATIC TRUE CACHE BOOL "Build RT64 as static library" FORCE)
+    add_compile_definitions(HLSL_CPU DKR_USE_RT64)
+    add_subdirectory(lib/rt64)
+endif()
 
 # N64ModernRuntime (ultramodern + librecomp)
 add_subdirectory(lib/N64ModernRuntime)
@@ -42,16 +46,26 @@ if (MSVC)
     target_compile_options(RecompiledFuncs PRIVATE /w /Zi)
 endif()
 
-# Dear ImGui
-set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
-set(IMGUI_SOURCES
-    ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_draw.cpp
-    ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
-)
+# Dear ImGui — when DKR_USE_RT64=ON, take it from RT64's contrib (and let
+# rt64.lib provide the core/SDL2/DX12/Vulkan backend symbols). We only build
+# the SDL_Renderer2 backend ourselves since RT64 doesn't compile that one.
+# Otherwise use our vendored copy in third_party.
+if (DKR_USE_RT64)
+    set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/imgui")
+    set(IMGUI_SOURCES
+        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+    )
+else()
+    set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
+    set(IMGUI_SOURCES
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
+    )
+endif()
 
 # Main executable
 add_executable(DKRRecompiled
@@ -62,9 +76,21 @@ add_executable(DKRRecompiled
     src/stubs.cpp
     src/audio_diag.cpp
     src/menu_gui.cpp
+    src/stb_image_write_impl.c
     rsp/aspMain.cpp
     ${IMGUI_SOURCES}
 )
+
+if (DKR_USE_RT64)
+    target_sources(DKRRecompiled PRIVATE src/dkr_rt64_context.cpp)
+    target_link_libraries(DKRRecompiled PRIVATE rt64)
+    target_include_directories(DKRRecompiled PRIVATE
+        lib/rt64/src
+        lib/rt64/src/contrib
+        lib/rt64/src/contrib/hlslpp/include
+        ${CMAKE_BINARY_DIR}/rt64/src
+    )
+endif()
 
 target_include_directories(DKRRecompiled PRIVATE
     include
@@ -74,6 +100,7 @@ target_include_directories(DKRRecompiled PRIVATE
     lib/N64ModernRuntime/ultramodern/include
     lib/N64ModernRuntime/librecomp/include
     lib/N64ModernRuntime/N64Recomp/include
+    lib/rt64/src/contrib/stb
 )
 
 target_link_libraries(DKRRecompiled PRIVATE
