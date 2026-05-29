@@ -136,7 +136,13 @@ public:
             return;
         }
 
-        // Skip presentation while actively rendering to avoid tearing
+        // Skip presentation while actively rendering to avoid tearing.
+        // The completed-FB check (was: || !f3ddkr_is_completed_fb(fb_phys))
+        // is removed because the front buffer at the VI origin is never
+        // marked completed by f3ddkr_process_dl (only the back buffer is),
+        // which gated present_frame's main path out forever — leaving the
+        // window stuck on the empty last-frame texture.
+        uint32_t fb_phys = vi_origin & 0x7FFFFF;
         if (f3ddkr_is_rendering()) {
             if (fb_texture_) {
                 present_frame(fb_texture_width_, fb_texture_height_);
@@ -161,8 +167,8 @@ public:
         if (screen_width > 640) screen_width = 640;
         if (screen_height > 480) screen_height = 480;
 
-        // Use VI_ORIGIN for display
-        uint32_t fb_offset = vi_origin & 0x7FFFFF;
+        // Use VI_ORIGIN for display (fb_phys computed earlier for completed-FB check)
+        uint32_t fb_offset = fb_phys;
 
         // Get width from HLE if available
         uint16_t hle_width = f3ddkr_get_last_ci_width();
@@ -300,6 +306,11 @@ private:
         // Render ImGui overlay on top
         menu_gui_begin_frame();
         menu_gui_render();
+
+        // Screenshot capture (after ImGui render, before present)
+        if (menu_gui_screenshot_requested()) {
+            menu_gui_take_screenshot(renderer_, fb_width, fb_height);
+        }
 
         // Present
         SDL_RenderPresent(renderer_);
