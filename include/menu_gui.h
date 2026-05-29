@@ -36,4 +36,11 @@ void menu_gui_set_rom_path(const char* path);
 const char* menu_gui_get_rom_path();
 void menu_gui_set_rom_callback(void (*callback)(const char* path));
 
+// Screenshot: capture current framebuffer to PNG (F12)
+// Call from renderer after framebuffer is ready but before present
+void menu_gui_take_screenshot(SDL_Renderer* renderer, int fb_width, int fb_height);
+
+// Returns true if a screenshot was requested (and clears the flag)
+bool menu_gui_screenshot_requested();
+
 #endif // MENU_GUI_H
