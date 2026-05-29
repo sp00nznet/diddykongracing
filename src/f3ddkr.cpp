@@ -1265,6 +1265,93 @@ static void rasterize_triangle(const TransformedVertex& v0, const TransformedVer
 }
 
 // ============================================================
+// Near-plane triangle clipping (Sutherland-Hodgman)
+// ============================================================
+
+// Extended vertex with UVs for clipping interpolation
+struct ClipVertex {
+    float cx, cy, cz, cw;
+    float sx, sy;
+    float r, g, b, a;
+    float u, v;
+};
+
+static ClipVertex make_clip_vertex(const TransformedVertex& tv, float u, float v) {
+    ClipVertex cv;
+    cv.cx = tv.cx; cv.cy = tv.cy; cv.cz = tv.cz; cv.cw = tv.cw;
+    cv.sx = tv.sx; cv.sy = tv.sy;
+    cv.r = tv.r; cv.g = tv.g; cv.b = tv.b; cv.a = tv.a;
+    cv.u = u; cv.v = v;
+    return cv;
+}
+
+static ClipVertex lerp_clip_vertex(const ClipVertex& a, const ClipVertex& b, float t) {
+    ClipVertex out;
+    out.cx = a.cx + t * (b.cx - a.cx);
+    out.cy = a.cy + t * (b.cy - a.cy);
+    out.cz = a.cz + t * (b.cz - a.cz);
+    out.cw = a.cw + t * (b.cw - a.cw);
+    out.r = a.r + t * (b.r - a.r);
+    out.g = a.g + t * (b.g - a.g);
+    out.b = a.b + t * (b.b - a.b);
+    out.a = a.a + t * (b.a - a.a);
+    out.u = a.u + t * (b.u - a.u);
+    out.v = a.v + t * (b.v - a.v);
+    // Perspective divide for screen coords
+    if (out.cw > 0.001f) {
+        float inv_w = 1.0f / out.cw;
+        out.sx = out.cx * inv_w * g_state.vp_scale_x + g_state.vp_trans_x;
+        out.sy = out.cy * inv_w * g_state.vp_scale_y + g_state.vp_trans_y;
+        out.sx = std::clamp(out.sx, -2048.0f, 2048.0f);
+        out.sy = std::clamp(out.sy, -2048.0f, 2048.0f);
+    } else {
+        out.sx = 0; out.sy = 0;
+    }
+    return out;
+}
+
+// Clip polygon against near plane (w >= NEAR_W).
+// Input: polygon vertices (3-7), output: clipped polygon vertices.
+// Returns number of output vertices (0 = fully clipped).
+static constexpr float NEAR_W = 0.1f;
+
+static int clip_near_plane(const ClipVertex* in, int n_in, ClipVertex* out) {
+    int n_out = 0;
+    for (int i = 0; i < n_in && n_out < 7; i++) {
+        const ClipVertex& cur = in[i];
+        const ClipVertex& next = in[(i + 1) % n_in];
+        bool cur_inside = cur.cw >= NEAR_W;
+        bool next_inside = next.cw >= NEAR_W;
+
+        if (cur_inside) {
+            out[n_out++] = cur;
+            if (!next_inside && n_out < 7) {
+                // Exiting: interpolate to edge
+                float t = (NEAR_W - cur.cw) / (next.cw - cur.cw);
+                out[n_out++] = lerp_clip_vertex(cur, next, t);
+            }
+        } else if (next_inside) {
+            // Entering: interpolate from edge
+            float t = (NEAR_W - cur.cw) / (next.cw - cur.cw);
+            out[n_out++] = lerp_clip_vertex(cur, next, t);
+        }
+    }
+    return n_out;
+}
+
+// Helper: convert ClipVertex to TransformedVertex for rasterizer
+static TransformedVertex clip_to_tv(const ClipVertex& cv) {
+    TransformedVertex tv;
+    tv.cx = cv.cx; tv.cy = cv.cy; tv.cz = cv.cz; tv.cw = cv.cw;
+    tv.sx = cv.sx; tv.sy = cv.sy;
+    tv.r = (uint8_t)std::clamp(cv.r, 0.0f, 255.0f);
+    tv.g = (uint8_t)std::clamp(cv.g, 0.0f, 255.0f);
+    tv.b = (uint8_t)std::clamp(cv.b, 0.0f, 255.0f);
+    tv.a = (uint8_t)std::clamp(cv.a, 0.0f, 255.0f);
+    return tv;
+}
+
+// ============================================================
 // Phase 2: G_TRIN handler
 // ============================================================
 static void cmd_trin(uint32_t w0, uint32_t w1) {
@@ -1293,31 +1380,10 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
 
         g_state.tri_total_count++;
 
-        // Near-plane clipping: skip triangles with any vertex behind or too close to camera.
-        // Vertices with very small w produce extreme screen coords that shatter geometry.
-        if (v0.cw <= 0.1f || v1.cw <= 0.1f || v2.cw <= 0.1f) continue;
+        // All vertices behind near plane — fully clipped
+        if (v0.cw <= 0.0f && v1.cw <= 0.0f && v2.cw <= 0.0f) continue;
 
-        // Reject triangles that are entirely off-screen (all vertices outside bounds)
-        float min_sx = std::min({v0.sx, v1.sx, v2.sx});
-        float max_sx = std::max({v0.sx, v1.sx, v2.sx});
-        float min_sy = std::min({v0.sy, v1.sy, v2.sy});
-        float max_sy = std::max({v0.sy, v1.sy, v2.sy});
-        if (max_sx < -512 || min_sx > 832 || max_sy < -512 || min_sy > 752) continue;
-        // Reject extremely large triangles (near-plane artifacts)
-        if ((max_sx - min_sx) > 1024 || (max_sy - min_sy) > 1024) continue;
-
-        // Backface culling — disabled pending winding direction verification.
-        // DKR's F3DDKR microcode uses per-triangle flags (0x40 = draw both sides)
-        // and geometry mode (G_CULL_BACK/G_CULL_FRONT), but the default geometry
-        // mode and winding convention need to be confirmed before enabling.
-        // TODO: enable once DKR's default geometry mode is determined
-        // if (!(flags & TRI_BACKFACE_DRAW)) {
-        //     float cross = (v1.sx - v0.sx) * (v2.sy - v0.sy) - (v2.sx - v0.sx) * (v1.sy - v0.sy);
-        //     if ((g_state.geometry_mode & G_CULL_BACK) && cross < 0) continue;
-        //     if ((g_state.geometry_mode & G_CULL_FRONT) && cross > 0) continue;
-        // }
-
-        // UV coordinates from triangle struct (s10.5 fixed-point → s16)
+        // UV coordinates from triangle struct (s10.5 fixed-point → float)
         float u0 = 0, v0_tc = 0, u1 = 0, v1_tc = 0, u2 = 0, v2_tc = 0;
         if (tex_enabled) {
             int16_t raw_u0 = rdram_read_s16(g_state.rdram, tri_addr + 4);
@@ -1326,18 +1392,63 @@ static void cmd_trin(uint32_t w0, uint32_t w1) {
             int16_t raw_v1 = rdram_read_s16(g_state.rdram, tri_addr + 10);
             int16_t raw_u2 = rdram_read_s16(g_state.rdram, tri_addr + 12);
             int16_t raw_v2 = rdram_read_s16(g_state.rdram, tri_addr + 14);
-
-            // Convert s10.5 fixed-point to float
-            u0 = raw_u0 / 32.0f;
-            v0_tc = raw_v0 / 32.0f;
-            u1 = raw_u1 / 32.0f;
-            v1_tc = raw_v1 / 32.0f;
-            u2 = raw_u2 / 32.0f;
-            v2_tc = raw_v2 / 32.0f;
+            u0 = raw_u0 / 32.0f; v0_tc = raw_v0 / 32.0f;
+            u1 = raw_u1 / 32.0f; v1_tc = raw_v1 / 32.0f;
+            u2 = raw_u2 / 32.0f; v2_tc = raw_v2 / 32.0f;
         }
 
-        rasterize_triangle(v0, v1, v2, u0, v0_tc, u1, v1_tc, u2, v2_tc,
-                           tex_enabled != 0, 0); // tile 0 by default
+        // Near-plane clipping: if any vertex is behind near plane, clip the triangle
+        // instead of rejecting it entirely (fixes ground geometry corruption)
+        ClipVertex clipped[7];
+        int n_clipped;
+
+        if (v0.cw < NEAR_W || v1.cw < NEAR_W || v2.cw < NEAR_W) {
+            ClipVertex tri_in[3] = {
+                make_clip_vertex(v0, u0, v0_tc),
+                make_clip_vertex(v1, u1, v1_tc),
+                make_clip_vertex(v2, u2, v2_tc),
+            };
+            n_clipped = clip_near_plane(tri_in, 3, clipped);
+            if (n_clipped < 3) continue;
+        } else {
+            // No clipping needed — pass through
+            clipped[0] = make_clip_vertex(v0, u0, v0_tc);
+            clipped[1] = make_clip_vertex(v1, u1, v1_tc);
+            clipped[2] = make_clip_vertex(v2, u2, v2_tc);
+            n_clipped = 3;
+        }
+
+        // Fan-triangulate the clipped polygon and rasterize each sub-triangle
+        for (int t = 1; t + 1 < n_clipped; t++) {
+            TransformedVertex tv0 = clip_to_tv(clipped[0]);
+            TransformedVertex tv1 = clip_to_tv(clipped[t]);
+            TransformedVertex tv2 = clip_to_tv(clipped[t + 1]);
+
+            // Reject off-screen triangles
+            float min_sx = std::min({tv0.sx, tv1.sx, tv2.sx});
+            float max_sx = std::max({tv0.sx, tv1.sx, tv2.sx});
+            float min_sy = std::min({tv0.sy, tv1.sy, tv2.sy});
+            float max_sy = std::max({tv0.sy, tv1.sy, tv2.sy});
+            if (max_sx < -512 || min_sx > 832 || max_sy < -512 || min_sy > 752) continue;
+            if ((max_sx - min_sx) > 1024 || (max_sy - min_sy) > 1024) continue;
+
+            // Backface culling: DKR init clears all culling (geometry_mode=0).
+            // render_scene explicitly clears G_CULL_FRONT. Game dynamically
+            // sets G_CULL_FRONT/BACK via G_SETGEOMETRYMODE commands.
+            // Per-triangle flag 0x40 = draw both faces (skip culling).
+            if (!(flags & TRI_BACKFACE_DRAW) && (g_state.geometry_mode & G_CULL_BOTH)) {
+                float cross = (tv1.sx - tv0.sx) * (tv2.sy - tv0.sy) -
+                              (tv2.sx - tv0.sx) * (tv1.sy - tv0.sy);
+                if ((g_state.geometry_mode & G_CULL_BACK) && cross < 0) continue;
+                if ((g_state.geometry_mode & G_CULL_FRONT) && cross > 0) continue;
+            }
+
+            rasterize_triangle(tv0, tv1, tv2,
+                               clipped[0].u, clipped[0].v,
+                               clipped[t].u, clipped[t].v,
+                               clipped[t + 1].u, clipped[t + 1].v,
+                               tex_enabled != 0, 0);
+        }
     }
 
     // Reset vertex index after drawing (matches GLideN64)
