@@ -1,6 +1,8 @@
 [submodule "lib/N64ModernRuntime"]
 	path = lib/N64ModernRuntime
-	url = https://github.com/N64Recomp/N64ModernRuntime.git
+	url = https://github.com/sp00nznet/N64ModernRuntime.git
+	branch = dkr-fixes
 [submodule "lib/rt64"]
 	path = lib/rt64
-	url = https://github.com/rt64/rt64.git
+	url = https://github.com/sp00nznet/rt64.git
+	branch = dkr-fixes
