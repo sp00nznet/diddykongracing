@@ -1,135 +1,81 @@
 cmake_minimum_required(VERSION 3.20)
-project(DKRRecompiled LANGUAGES C CXX)
+
+project(DKRRecompiled VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED True)
 
-# Fetch SDL2
-include(FetchContent)
-FetchContent_Declare(
-    SDL2
-    URL https://github.com/libsdl-org/SDL/releases/download/release-2.30.3/SDL2-2.30.3.zip
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-)
-FetchContent_MakeAvailable(SDL2)
+# Toolkits: deps/ when tools/setup.ps1 fetched them there, else sibling checkouts (docs/building.md).
+foreach(dep N64ModernRuntime rt64)
+    if(EXISTS "${CMAKE_SOURCE_DIR}/deps/${dep}/CMakeLists.txt")
+        set(default_${dep} "${CMAKE_SOURCE_DIR}/deps/${dep}")
+    else()
+        set(default_${dep} "${CMAKE_SOURCE_DIR}/../${dep}")
+    endif()
+endforeach()
+set(N64_MODERN_RUNTIME_DIR "${default_N64ModernRuntime}" CACHE PATH "Path to N64ModernRuntime")
+set(RT64_DIR "${default_rt64}" CACHE PATH "Path to RT64 (with F3DDKR support)")
 
-# RT64 renderer — Stage 1 of the swap. F3DDKR microcode isn't in RT64's
-# GBI database yet, so DLs won't actually render. We're just validating
-# the build/plumbing; SW renderer remains the default fallback.
-option(DKR_USE_RT64 "Build with RT64 renderer (stage 1: init only, no DKR microcode support)" OFF)
-if (DKR_USE_RT64)
-    set(RT64_STATIC TRUE CACHE BOOL "Build RT64 as static library" FORCE)
-    add_compile_definitions(HLSL_CPU DKR_USE_RT64)
-    add_subdirectory(lib/rt64)
-endif()
+foreach(generated RecompiledFuncs/funcs.h rsp/aspMain.cpp)
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/${generated}")
+        message(FATAL_ERROR "${generated} is missing: recompile your ROM first (README, Step by step; Setup.cmd does it).")
+    endif()
+endforeach()
 
-# N64ModernRuntime (ultramodern + librecomp)
-add_subdirectory(lib/N64ModernRuntime)
+# SDL2: the Windows build RT64 ships (RT64 links it by bare name from this folder).
+set(SDL2_DIR_WIN "${RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3")
+link_directories("${SDL2_DIR_WIN}/lib/x64")
+add_library(SDL2::SDL2 SHARED IMPORTED)
+set_target_properties(SDL2::SDL2 PROPERTIES
+    IMPORTED_LOCATION "${SDL2_DIR_WIN}/lib/x64/SDL2.dll"
+    IMPORTED_IMPLIB "${SDL2_DIR_WIN}/lib/x64/SDL2.lib"
+    INTERFACE_INCLUDE_DIRECTORIES "${SDL2_DIR_WIN}/include")
+add_library(SDL2::SDL2main STATIC IMPORTED)
+set_target_properties(SDL2::SDL2main PROPERTIES IMPORTED_LOCATION "${SDL2_DIR_WIN}/lib/x64/SDL2main.lib")
 
-# Recompiled functions static library
-file(GLOB RECOMP_SOURCES "RecompiledFuncs/*.c" "RecompiledFuncs/*.cpp")
+set(RT64_STATIC ON CACHE BOOL "Build RT64 as static library" FORCE)
+add_subdirectory(${RT64_DIR} ${CMAKE_BINARY_DIR}/rt64)
+
+add_subdirectory(${N64_MODERN_RUNTIME_DIR} ${CMAKE_BINARY_DIR}/N64ModernRuntime)
+# The anti-piracy checks read RSP memory, low RDRAM and cart ROM through KSEG1 (0xA0000000 to
+# 0xB0000574), which the recompiled code maps 512 to 768 MB past RDRAM. Commit that far so those
+# reads land in memory src/main.cpp seeds (docs/game-fixes.md).
+target_compile_definitions(librecomp PUBLIC RECOMP_MEM_SIZE_MB=784)
+
+# The game's code, recompiled from your ROM (tools/setup.ps1 or the README's steps). Never committed.
+file(GLOB RECOMP_SOURCES "RecompiledFuncs/*.c")
 add_library(RecompiledFuncs STATIC ${RECOMP_SOURCES})
-target_include_directories(RecompiledFuncs PRIVATE
-    include
-    lib/N64ModernRuntime/ultramodern/include
-    lib/N64ModernRuntime/librecomp/include
-    lib/N64ModernRuntime/N64Recomp/include
-)
-target_compile_options(RecompiledFuncs PRIVATE
-    $<$<C_COMPILER_ID:MSVC>:/w>
-    $<$<C_COMPILER_ID:Clang>:-fno-strict-aliasing -Wno-unused-variable -Wno-implicit-function-declaration>
-    $<$<C_COMPILER_ID:GNU>:-fno-strict-aliasing -Wno-unused-variable -Wno-implicit-function-declaration>
-)
-if (MSVC)
-    target_compile_options(RecompiledFuncs PRIVATE /w /Zi)
-endif()
-
-# Dear ImGui — when DKR_USE_RT64=ON, take it from RT64's contrib (and let
-# rt64.lib provide the core/SDL2/DX12/Vulkan backend symbols). We only build
-# the SDL_Renderer2 backend ourselves since RT64 doesn't compile that one.
-# Otherwise use our vendored copy in third_party.
-if (DKR_USE_RT64)
-    set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/lib/rt64/src/contrib/imgui")
-    set(IMGUI_SOURCES
-        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
-    )
+target_include_directories(RecompiledFuncs PRIVATE ${N64_MODERN_RUNTIME_DIR}/N64Recomp/include RecompiledFuncs)
+if(MSVC)
+    target_compile_options(RecompiledFuncs PRIVATE /w)
 else()
-    set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/third_party/imgui")
-    set(IMGUI_SOURCES
-        ${IMGUI_DIR}/imgui.cpp
-        ${IMGUI_DIR}/imgui_draw.cpp
-        ${IMGUI_DIR}/imgui_tables.cpp
-        ${IMGUI_DIR}/imgui_widgets.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdl2.cpp
-        ${IMGUI_DIR}/backends/imgui_impl_sdlrenderer2.cpp
-    )
+    target_compile_options(RecompiledFuncs PRIVATE -fno-strict-aliasing -w)
 endif()
 
-# Main executable
+add_subdirectory(frontend)
+
 add_executable(DKRRecompiled
     src/main.cpp
-    src/register_overlays.cpp
-    src/rt64_render_context.cpp
-    src/f3ddkr.cpp
-    src/stubs.cpp
-    src/audio_diag.cpp
-    src/menu_gui.cpp
-    src/stb_image_write_impl.c
+    src/dkr_stubs.c
     rsp/aspMain.cpp
-    ${IMGUI_SOURCES}
 )
-
-if (DKR_USE_RT64)
-    target_sources(DKRRecompiled PRIVATE src/dkr_rt64_context.cpp)
-    target_link_libraries(DKRRecompiled PRIVATE rt64)
-    target_include_directories(DKRRecompiled PRIVATE
-        lib/rt64/src
-        lib/rt64/src/contrib
-        lib/rt64/src/contrib/hlslpp/include
-        ${CMAKE_BINARY_DIR}/rt64/src
-    )
-endif()
-
 target_include_directories(DKRRecompiled PRIVATE
-    include
+    ${N64_MODERN_RUNTIME_DIR}/N64Recomp/include
+    ${N64_MODERN_RUNTIME_DIR}/librecomp/include
+    ${N64_MODERN_RUNTIME_DIR}/ultramodern/include
     RecompiledFuncs
-    ${IMGUI_DIR}
-    ${IMGUI_DIR}/backends
-    lib/N64ModernRuntime/ultramodern/include
-    lib/N64ModernRuntime/librecomp/include
-    lib/N64ModernRuntime/N64Recomp/include
-    lib/rt64/src/contrib/stb
 )
+target_compile_definitions(DKRRecompiled PRIVATE NOMINMAX DKR_VERSION="${PROJECT_VERSION}")
+target_link_libraries(DKRRecompiled PRIVATE RecompiledFuncs librecomp ultramodern n64frontend rt64 SDL2::SDL2 SDL2::SDL2main)
 
-target_link_libraries(DKRRecompiled PRIVATE
-    RecompiledFuncs
-    librecomp
-    ultramodern
-    SDL2::SDL2
-    SDL2::SDL2main
-)
-
-if (WIN32)
-    target_link_libraries(DKRRecompiled PRIVATE Winmm.lib Dbghelp.lib)
-    # Generate PDB and MAP in Release for crash diagnostics
-    target_compile_options(DKRRecompiled PRIVATE /Zi)
-    target_link_options(DKRRecompiled PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF /MAP>)
-    set_target_properties(DKRRecompiled PROPERTIES
-        VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-    )
-    # Copy SDL2.dll
-    add_custom_command(TARGET DKRRecompiled POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE_DIR:SDL2::SDL2>/SDL2.dll"
-            "$<TARGET_FILE_DIR:DKRRecompiled>/SDL2.dll"
-    )
+if(WIN32)
+    target_link_libraries(DKRRecompiled PRIVATE dxgi d3d12 d3dcompiler dbghelp ws2_32)
+    target_link_options(DKRRecompiled PRIVATE /MAP)
+    # RT64 loads the DXC runtime from next to the exe; without it, setup silently skips init.
+    add_custom_command(TARGET DKRRecompiled POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${RT64_DIR}/src/contrib/dxc/bin/x64/dxil.dll ${RT64_DIR}/src/contrib/dxc/bin/x64/dxcompiler.dll
+        ${SDL2_DIR_WIN}/lib/x64/SDL2.dll
+        $<TARGET_FILE_DIR:DKRRecompiled>)
 endif()
-
-target_compile_definitions(DKRRecompiled PRIVATE
-    DKR_VERSION_MAJOR=0
-    DKR_VERSION_MINOR=1
-    DKR_VERSION_PATCH=0
-    NOMINMAX
-)

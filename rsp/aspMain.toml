@@ -1,0 +1,19 @@
+# DKR's audio microcode (libultra's n_aspMain), recompiled to C++ by N64Recomp's RSPRecomp:
+#   RSPRecomp rsp/aspMain.toml    (writes rsp/aspMain.cpp; generated from the ROM, never committed)
+# Text: ROM 0xD8760, 0xEC0 bytes (the next textbin, rspboot, starts at 0xD9620). Like every libultra
+# audio microcode it runs from IMEM 0x1080: rspboot occupies 0x1000-0x107F. The old build used
+# 0x1000, which put every jump 0x80 bytes off (docs/game-fixes.md).
+
+rom_file_path = "../baserom.us.z64"
+output_file_path = "aspMain.cpp"
+output_function_name = "aspMain"
+text_offset = 0xD8760
+text_size = 0xEC0
+text_address = 0x04001080
+
+# The audio command jump table: 16 halfwords at ucode data +0x10 (ROM 0xEAA60), one handler per
+# command, reached with jr. RSPRecomp can't see data, so they're listed here.
+extra_indirect_branch_targets = [
+    0x1118, 0x14A4, 0x11EC, 0x1BA0, 0x123C, 0x18D4, 0x1270, 0x12D4,
+    0x12F0, 0x132C, 0x1428, 0x12A4, 0x1E3C, 0x1390, 0x1758, 0x1480,
+]

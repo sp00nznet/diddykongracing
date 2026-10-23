@@ -1,176 +1,165 @@
-# DKR Recompiled
+# Diddy Kong Racing Recompiled
 
-Static recompilation of **Diddy Kong Racing** (N64, US v1.1) for Windows 11 using [N64Recomp](https://github.com/N64Recomp/N64Recomp).
-
-![Diddy Flyby with N64 Logo](images/diddy_flyby_n64_logo.png)
+A native Windows port of **Diddy Kong Racing** (N64, 1997), made by statically recompiling the
+game's own code with [N64Recomp](https://github.com/N64Recomp/N64Recomp) and drawing it with
+[RT64](https://github.com/rt64/rt64). You supply your own ROM; nothing from the game is in this
+repo or downloaded by it.
 
 ## Status
 
-- **Build**: Compiles successfully (MSVC, x64, Release)
-- **Runtime**: Adventure mode overworld reached — full boot chain, menus, character select, cinematics, hub world
-- **Rendering**: All scenes right-side up (antipiracy viewport bypass, single-stage vertex transform)
-- **Functions**: 1956 recompiled functions + aspMain RSP microcode
-- **Display**: Software framebuffer via SDL2 (320x237, RGBA5551, 60Hz double-buffered), default 2x window scale
-- **f3ddkr HLE**: Custom microcode interpreter with full rendering pipeline
-- **GUI**: ImGui overlay — menu bar (File/Config/About), settings window (F1), debug overlay (F2)
-- **Input**: Keyboard (WASD=analog stick, arrows=D-pad) and Xbox-style gamepad supported (SDL2 GameController API)
-- **Audio**: HLE audio pipeline — all 14 aspMain opcodes active, stereo output at 22050 Hz (reverb FX disabled)
-- **Saves**: EEPROM 4K implemented (N64ModernRuntime built-in, saves to AppData)
-- **RDRAM**: 4GB allocation (all read/write), gzip pointer validation guards
-- **RT64**: Removed from build (DKR's f3ddkr microcode not supported)
+**v0.2.0, alpha.** The game boots, plays its attract mode, and goes through the menus into
+Adventure mode, with sound and at any resolution. Races beyond the first steps of Adventure haven't
+been played through yet.
 
-### Anti-tamper / DRM Bypass (2026-03-18)
-The retail ROM has three `IO_READ`-based DRM checks that read N64 hardware registers (SP DMEM, SP IMEM, PIF RAM). In the recomp these map to uninitialized RDRAM offsets, causing all three to fail:
-- **`drm_validate_dmem`**: Reads SP_DMEM[0] — when it fails, `gDmemInvalid=TRUE` causes a 10 million iteration busy loop every frame
-- **`drm_validate_imem`**: Reads SP_IMEM[0] for CIC_ID — when it fails, `sAntiPiracyTriggered=TRUE` forces START button every frame during gameplay (instant pause)
-- **`render_scene` anti-tamper**: Reads PIF_RAM[0x200] — when it fails, all tracks are mirrored
+| | |
+|---|---|
+| Intro, attract mode, title | yes |
+| Menus: character select, game select, initials | yes |
+| Adventure mode: hub island, Taj | yes |
+| Races, Tracks mode, multiplayer | not tested yet ([ROADMAP](ROADMAP.md)) |
+| Graphics: RT64 (D3D12), any resolution, MSAA, widescreen option, texture packs | yes |
+| Sound and music | yes |
+| Saves (EEPROM: Adventure progress, times) | written to `saves\dkr.us.bin`; reloading progress not checked yet |
+| Controller pak (ghosts) | no: the game is told no pak is plugged in |
+| Controllers: keyboard and up to 4 pads, rebindable | yes |
+| Platforms | Windows 10/11 x64 |
 
-All three bypassed by writing expected values to RDRAM in `on_init_callback`.
+What it took, and why each fix sits where it does: [docs/game-fixes.md](docs/game-fixes.md).
 
-### Rendering Pipeline
-- **Antipiracy bypass**: DKR checks ROM integrity at boot — recompiled binary triggers the check, flipping the viewport. Bypassed by forcing `gAntiPiracyViewport = FALSE` in RDRAM
-- **Single-stage vertex transform**: Decomp-confirmed — no two-stage multiply in f3ddkr RSP; game pre-combines MVP matrices
-- **Viewport Y-flip**: N64 positive vscale_y negated for correct software rasterizer orientation
-- **Near-plane clipping**: Vertices with w <= 0.1 rejected, screen coords clamped to ±2048, oversized triangles rejected
-- **Color combiner**: N64 (A-B)*C+D formula, 1-cycle and 2-cycle modes
-- **RDP blender**: Full (P*A + M*B)/(A+B) formula with FORCE_BL support
-- **Distance fog**: Per-vertex fog computation via RSP HLE (G_FOG geometry mode)
-- **Z-buffer**: Depth test with proper fallback (returns max depth when no z-buffer set)
-- **Alpha blending**: Framebuffer read-modify-write with configurable blend modes
-- **Alpha test**: Transparent pixels correctly skipped
-- **TEXRECT**: Textured rectangles in copy and combiner modes
-- **Triangles**: Scanline rasterizer with Z-buffer, scissor clipping
-- **Textures**: RGBA16/32, CI4/8, IA4/8/16, I4/8 with TMEM interleaving
-- **Fill rect**: Fill/1-cycle/2-cycle modes
-- **Render guard**: Re-presents last good frame while f3ddkr is actively rendering to prevent tearing
+## Screenshots
 
-### Task Execution
-- **Synchronous on game thread**: Both GFX and audio RSP tasks run synchronously on the game thread, with SP_COMPLETE and DP_COMPLETE messages sent directly via `osSendMesg` (blocking). This eliminates the external message queue deadlock that occurred when the gfx thread's completion signals couldn't reach the scheduler.
+| | | |
+|:-:|:-:|:-:|
+| ![N64 logo fly-by](docs/screenshots/n64-logo.png) | ![Attract mode: the beach](docs/screenshots/beach.png) | ![Attract mode: Timber](docs/screenshots/timber.png) |
+| Intro | Attract mode | Attract mode |
+| ![Title screen](docs/screenshots/title.png) | ![Character select](docs/screenshots/character-select.png) | ![Adventure: Taj arrives](docs/screenshots/taj.png) |
+| Title | Character select | Adventure: Taj |
 
-### GUI (ImGui)
-- **Menu bar**: File (Quit), Config (Settings), About (Help)
-- **Settings window** (F1): General (ROM file selector), Display (window scale 1x-4x), Input, Audio tabs
-- **Debug overlay** (F2): FPS graph, display info
-- **Help window**: Project info, repository link, credits
-- **Theme**: xemu-inspired dark green
+All captured from the real build with `--headless --record` (see [Usage](#usage)), 2026-10-23.
 
-### Audio Pipeline
-- **aspMain HLE**: Recompiled RSP audio microcode (MIPS to C++) with HLE intercepts for broken dispatch handlers
-- **ADPCM HLE**: Fixed dispatch[1]=L_14A4 which entered decode loop without register setup — redirects to L_1428 for proper param read, segment resolve, and state init
-- **SETVOL HLE**: Full DKR-specific 5-command envelope setup (vol, target, rate, dry/wet)
-- **ENVMIXER HLE**: Linear envelope mixer with per-sample volume ramping, combined gain computation (vol * dry/wet with rounding), and self-consistent 80-byte state save/restore for voice continuation
-- **MIXER HLE**: VMULF/VMACF accumulation (dispatch[12] enters at loop body, skipping all setup)
-- **INTERLEAVE HLE**: Stereo L/R channel interleaving to output buffer
-- **SAVEBUFF/LOADBUFF HLE**: DMA handlers intercepted — dispatch[6] acted as SETBUFF, dispatch[4] used wrong addresses. Both now use SETBUFF params with bounds-checked byte copy.
-- **DMEMMOVE HLE**: dispatch[10]=L_1428 was ADPCM setup, not a memory copy — now does proper DMEM-to-DMEM byte copy
-- **SEGMENT HLE**: Populates segment table at DMEM[0x320]
-- **LOADADPCM HLE**: DMA loads codebook from RDRAM to DMEM[0x4C0]
-- **SETBUFF HLE**: Writes to both param banks (0x00 and 0x10 offsets)
-- **RESAMPLE**: Fixed infinite loop in op=5 handler (setup/body label split)
-- **Null task handling**: DKR submits every 3rd audio task with data_size=0 — silently skipped to prevent 1MB garbage DMA
-- **Unknown opcode tolerance**: Command buffer gaps with uninitialized RDRAM are skipped instead of aborting the task
-- **Scheduler**: Fixed SI message requeue starvation that blocked SP/DP/VI delivery
-- **Output**: SDL2 push-mode audio via `SDL_QueueAudio` (AUDIO_S16SYS, stereo, byte-order corrected)
+## Getting Started
 
-### Controls
-| Key | N64 Button | | Key | N64 Button |
-|-----|------------|-|-----|------------|
-| W/A/S/D | Analog Stick | | Q | L Trigger |
-| Return/Space | A | | E | R Trigger |
-| LShift | B | | I/K/J/L | C-Up/Down/Left/Right |
-| Z | Z Trigger | | Arrows | D-Pad |
-| Escape | Start | | | |
+You need a Windows 10/11 x64 PC with a DirectX 12 GPU, about 8 GB of free disk, and your own
+**USA v1.1** ROM of Diddy Kong Racing as a big-endian `.z64` file (SHA1
+`6d96743d46f8c0cd0edb0ec5600b003c89b93755`, header CRC1 `E402430D`).
 
-Xbox-style gamepads are also supported:
-| Gamepad | N64 Button | | Gamepad | N64 Button |
-|---------|------------|-|---------|------------|
-| A | A | | Left Trigger | Z Trigger |
-| X | B | | Right Trigger | R Trigger |
-| Start | Start | | Left Stick | Analog Stick |
+### Quick start
 
-## Building
+1. Download this repo ([Code → Download ZIP](https://github.com/sp00nznet/diddykongracing/archive/refs/heads/main.zip))
+   and unzip it somewhere with a short path (such as `C:\Games\DKR`).
+2. Put your ROM in that folder. Any file name works.
+3. Double-click **`Setup.cmd`**. It checks for Git, CMake and Visual Studio's C++ build tools and
+   asks before installing any that are missing (through winget). It then downloads the recompiler,
+   runtime and renderer, recompiles your ROM and builds the game. The first run takes 30 to 60
+   minutes; a rerun after a failure picks up where it stopped. If it stops, it says why in one
+   sentence; the full log is `logs\setup.log`.
+4. Double-click **`Diddy Kong Racing (recomp).cmd`**.
 
-### Prerequisites
-- Visual Studio 2022 (MSVC toolchain)
-- CMake 3.20+
-- N64Recomp tool (for regenerating recompiled functions)
+### Step by step
 
-### Build
-```bash
-cd tracking/build
-cmake .. -G "Visual Studio 17 2022" -A x64
-cmake --build . --config Release
+Each command runs in the repo folder, in a Developer PowerShell or any terminal.
+
+1. Install [Git](https://git-scm.com/), [CMake 3.20+](https://cmake.org/), and Visual Studio 2022
+   (or its Build Tools) with the **Desktop development with C++** workload. Open a new terminal
+   afterwards so `PATH` is current.
+2. Get the toolkits (sp00nznet's forks; [docs/building.md](docs/building.md) says why each branch):
+   ```
+   git -c core.longpaths=true clone --recurse-submodules -b fix/fallthrough-tail-call https://github.com/sp00nznet/N64Recomp deps\N64Recomp
+   git -c core.longpaths=true clone --recurse-submodules -b feat/synchronous-rsp-tasks https://github.com/sp00nznet/N64ModernRuntime deps\N64ModernRuntime
+   git -c core.longpaths=true clone --recurse-submodules -b feat/f3ddkr https://github.com/sp00nznet/rt64 deps\rt64
+   ```
+3. Build the recompilers:
+   ```
+   cmake -S deps\N64Recomp -B deps\N64Recomp\build -G "Visual Studio 17 2022" -A x64
+   cmake --build deps\N64Recomp\build --config Release --target N64RecompCLI RSPRecomp
+   ```
+4. Copy your ROM into the repo folder as `baserom.us.z64`.
+5. Recompile the game and its audio microcode:
+   ```
+   mkdir RecompiledFuncs
+   deps\N64Recomp\build\Release\N64Recomp.exe dkr.recomp.toml
+   deps\N64Recomp\build\Release\RSPRecomp.exe rsp\aspMain.toml
+   ```
+   The first prints `Function count: 1956` and ends with
+   `[Info] Fallthrough in coss_2 to sins_2`; the second prints nothing. They write
+   `RecompiledFuncs\` and `rsp\aspMain.cpp`.
+6. Build:
+   ```
+   cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+   cmake --build build --config RelWithDebInfo --target DKRRecompiled --parallel
+   ```
+   The game is `build\RelWithDebInfo\DKRRecompiled.exe`.
+7. Run it: `build\RelWithDebInfo\DKRRecompiled.exe`. The launcher asks for your ROM the first
+   time (drop the `.z64` on the window), or finds `baserom.us.z64` next to the exe or in the
+   working directory.
+
+Usual trip-ups: a tool "not found" right after installing it means the terminal predates the
+install, so open a new one. A build error about a missing file deep inside `deps\` usually means
+the folder path is too long; move the repo somewhere shorter.
+
+## Usage
+
+The exe opens a launcher: **Play**, **Host a game** / **Join** (2-player netplay, untested with
+DKR), and **Settings** (controls, graphics, sound). In the game, **Esc** or the controller's
+**Back** button opens the menu. `--play` skips the launcher. F11 or Alt+Enter toggles fullscreen.
+
+| N64 | Keyboard | Controller |
+|---|---|---|
+| Stick | W A S D / arrows | left stick |
+| A (accelerate) | Enter or Space | A or right trigger |
+| B (brake) | Left Shift | X |
+| Z (use item) | Z | left trigger |
+| R (hop, power-slide) / L | E / Q | right / left shoulder |
+| Start | P or Backspace | Start |
+| C buttons | numpad 8 4 6 2 | right stick, Y / B |
+| D-pad | I J K L | D-pad |
+
+Settings live in `dkr.json` in the working directory (written on first run): resolution, MSAA,
+widescreen (`aspectRatio: Expand`), refresh rate, texture packs from `texture-packs\`, volume,
+deadzone, per-player devices and bindings.
+
+For testing and debugging, the exe takes `--headless` (the window sits off every monitor and is
+still rendered), `--record out.mp4` (30 fps of the window piped to `ffmpeg`, which must be on
+`PATH`), and these environment variables:
+
+| Variable | Does |
+|---|---|
+| `DKR_QUIT_AFTER=60` | quits after that many seconds |
+| `DKR_SHOT=10:a.bmp,30:b.bmp` | saves the window to those files at those times (seconds) |
+| `DKR_AUTOPRESS=4:1000,7:8000` | holds N64 buttons (hex: `1000` Start, `8000` A, `4000` B, `2000` Z, `0010` R) for 0.25 s at those times |
+| `DKR_AUDIODUMP=out.raw` | also writes the sound as raw 16-bit stereo |
+| `DKR_STACKDUMP=20` | prints every thread's stack at that time, for hangs |
+| `DKR_PEEK=0x801217E0,...` | prints those RDRAM words with a stack dump or crash |
+| `DKR_WATCH=0x80121A54@5` | after 5 s, traps the first write to that RDRAM word and prints who did it |
+| `DKR_DISPLAY=1` | opens on that monitor |
+
+A run that goes from boot to the Adventure hub and records it:
+
+```
+set DKR_AUTOPRESS=4:1000,7:1000,10:8000,13:8000,16:8000,19:8000,22:1000,25:1000,28:8000,31:8000,34:8000,37:1000,39:8000
+set DKR_QUIT_AFTER=90
+build\RelWithDebInfo\DKRRecompiled.exe --headless --record run.mp4
 ```
 
-### Post-build
-SDL2.dll must be copied manually after clean builds:
-```powershell
-Copy-Item 'build\_deps\sdl2-build\Release\SDL2.dll' 'build\Release\SDL2.dll'
-```
+## Building from source
 
-## Running
+The step-by-step route above is the build. [docs/building.md](docs/building.md) covers the
+toolkit branches, what each step produces, the symbol file and where it comes from, and using your
+own toolkit checkouts. [docs/architecture.md](docs/architecture.md) explains how the pieces fit;
+[docs/game-fixes.md](docs/game-fixes.md) lists every DKR-specific fix and why.
 
-Use the launch script from the project root:
-```
-run_dkr.bat
-run_dkr.bat "path\to\Diddy Kong Racing (U) [!].z64"
-```
+This is an [N64Recomp](https://github.com/N64Recomp/N64Recomp) project in sp00nznet's recomp
+house style, alongside [Racer](https://github.com/sp00nznet/racer) and
+[Rampage](https://github.com/sp00nznet/Rampage): the toolkit ships, the generated code never does,
+and fixes found here go back to the toolkits as PRs. Function names and the microcode details come
+from the [Diddy Kong Racing decompilation](https://github.com/DavidSM64/Diddy-Kong-Racing) (CC0).
 
-Or place your ROM as `build/Release/baserom.us.z64` and run the exe directly. You can also select a ROM via the in-game Settings menu (F1 -> General -> Browse).
+Want to help? [CONTRIBUTING.md](CONTRIBUTING.md).
 
-### ROM Requirements
-- Diddy Kong Racing (US) v1.1 (v80)
-- SHA1: `6d96743d46f8c0cd0edb0ec5600b003c89b93755`
+## License
 
-## Architecture
-
-```
-tracking/
-  CMakeLists.txt          # Build configuration
-  run_dkr.bat             # Launch script
-  dkr.recomp.toml         # N64Recomp configuration
-  dkr.us.syms.toml        # Symbol definitions (1956 functions)
-  include/
-    f3ddkr.h              # f3ddkr microcode definitions and state
-    menu_gui.h            # ImGui menu system API
-  src/
-    main.cpp              # Entry point, SDL init, input, audio, game lifecycle
-    rt64_render_context.cpp  # Software renderer + ImGui overlay bridge
-    f3ddkr.cpp            # f3ddkr HLE implementation (antipiracy bypass, vertex transform)
-    menu_gui.cpp          # ImGui menu system (settings, debug, help)
-    audio_diag.cpp        # Audio diagnostic wrappers (alAdpcmPull, alLoadParam, etc.)
-    stubs.cpp             # Stub functions for unresolved symbols
-    register_overlays.cpp # Overlay registration (none for DKR)
-  rsp/
-    aspMain.cpp           # aspMain audio RSP microcode HLE (all 14 opcodes)
-  third_party/
-    imgui/                # Dear ImGui (SDL2 + SDLRenderer2 backends)
-  lib/
-    N64ModernRuntime/     # ultramodern + librecomp runtime
-```
-
-## Recent Fixes (2026-03-18)
-
-- **Anti-tamper DRM bypass** — Three IO_READ-based DRM checks bypassed by writing expected values to RDRAM. This was the ROOT CAUSE of the adventure mode freeze (gDmemInvalid busy loop + sAntiPiracyTriggered forced START).
-- **Cinematic auto-skip** — MENU_NEWGAME_CINEMATIC (menu 23) auto-completes to avoid threading deadlock in fb_update/osRecvMesg during cutscene playback.
-- **Z-buffer depth fix** — `read_zbuf()` returns max depth (0xFFFF) when no z-buffer is set, preventing all pixels from failing depth test.
-- **Near-plane clipping** — Tighter near-plane threshold (w > 0.1), screen coord clamping (±2048), and oversized triangle rejection prevent ground-shattering artifacts.
-- **Render-during-present guard** — Re-presents last good frame while f3ddkr is actively rendering to prevent tearing.
-- **Window scaling** — Default 2x (640x480), dynamically changeable via F1 → Display tab.
-- **Missing function diagnostics** — Logs caller ra/r4/r5 for NULL function pointer calls.
-
-## Known Issues
-
-1. **Intermittent crashes**: Thread scheduler race conditions can crash during scene transitions (run_next_thread accessing corrupted thread contexts)
-2. **Graphical glitches**: Ground geometry corruption near camera (near-plane clipping artifacts), some texture bleeding, missing polygons
-3. **Backface culling disabled**: DKR's default geometry mode and winding convention need verification
-4. **NPC dialogue stuck**: Taj "switch vehicle" dialogue doesn't exit properly
-5. **Movement in overworld**: Requires WASD (analog stick), arrow keys are D-pad only
-6. **SDL2.dll post-build copy fails**: `pwsh.exe` not found in MSVC build environment
-7. **Audio FX disabled**: Reverb (alFxPull) disabled via `if(0)` to avoid ALDelay crashes
-8. **Some flashing during scene transitions**: Framebuffer alternation visible during level loads
-
-## Credits
-
-Built with [N64Recomp](https://github.com/N64Recomp/N64Recomp) and [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime).
-DKR decomp reference: [Diddy-Kong-Racing](https://github.com/DavidSM64/Diddy-Kong-Racing).
+This repo's own code is MIT, see [LICENSE](LICENSE). A built game links
+[N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime), which is GPL-3.0, so the exe as a
+whole falls under GPL-3.0; N64Recomp and RT64 are MIT, SDL2 zlib. No builds are distributed: you
+make your own from your own copy. Diddy Kong Racing is © Rare / Nintendo; none of the game's code
+or data is here, and the code generated from your ROM stays on your machine.

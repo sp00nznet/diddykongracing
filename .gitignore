@@ -1,22 +1,47 @@
-# Build output
-build/
-out/
-
-# ROM files (user must provide their own)
+# ROMs: you supply your own
 *.z64
 *.n64
 *.v64
 
-# IDE
+# Code recompiled from your ROM (N64Recomp, RSPRecomp): derived from the game, never committed
+RecompiledFuncs/
+rsp/aspMain.cpp
+
+# Build output
+build/
+build-*/
+build-farm/
+out/
+*.exe
+*.pdb
+*.map
+
+# Local working files: logs, captures, fetched toolkits, the launcher Setup makes
+scratch/
+logs/
+deps/
+*.log
+*.bmp
+*.mp4
+* (recomp).cmd
+
+# Written in the working directory on first run
+dkr.json
+texture-packs/
+netplay/
+saves/
+
+# Python / Node
+__pycache__/
+*.pyc
+node_modules/
+
+# IDE / OS
 .vs/
 .vscode/
+.idea/
 *.user
 CMakeSettings.json
-
-# Diagnostic logs
-*.log
-run_diag.ps1
-
-# OS
 Thumbs.db
 .DS_Store
+desktop.ini

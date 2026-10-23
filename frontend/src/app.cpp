@@ -1,0 +1,244 @@
+// The window, the event loop, how the game starts, and the callbacks fe::run hands librecomp.
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+#include <SDL.h>
+#include <SDL_syswm.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
+#include "librecomp/game.hpp"
+#include "ultramodern/ultramodern.hpp"
+#include "ultramodern/error_handling.hpp"
+#include "ultramodern/events.hpp"
+#include "config.hpp"
+#include "internal.hpp"
+
+namespace fe {
+namespace {
+
+SDL_Window* g_window = nullptr;
+bool g_headless = false;
+bool g_launcher = true;
+std::filesystem::path g_base;
+int g_window_display = -1;
+
+const char* env(const char* name) { return std::getenv((g_game.env_prefix + name).c_str()); }
+
+ultramodern::gfx_callbacks_t::gfx_data_t create_gfx() {
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
+    // Keep reading controllers when the window isn't focused (remote desktop, a second monitor).
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_AUDIO) < 0) {
+        fprintf(stderr, "Failed to initialize SDL2: %s\n", SDL_GetError());
+        std::exit(1);
+    }
+    return nullptr;
+}
+
+ultramodern::renderer::WindowHandle create_window(ultramodern::gfx_callbacks_t::gfx_data_t) {
+    // <prefix>DISPLAY=<n> overrides the configured monitor.
+    const char* d = env("DISPLAY");
+    g_window_display = d ? std::atoi(d) : g_config.display;
+    Uint32 flags = SDL_WINDOW_RESIZABLE | (g_config.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+    int x = SDL_WINDOWPOS_CENTERED_DISPLAY(g_window_display), y = x;
+    if (g_headless) {
+        // Shown, so the compositor keeps rendering it and captures work, but past the right edge of
+        // every monitor, with no taskbar button and never activated.
+        flags = SDL_WINDOW_SKIP_TASKBAR | SDL_WINDOW_BORDERLESS;
+        SDL_SetHint(SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN, "1");
+        x = 0;
+        for (int i = 0; i < SDL_GetNumVideoDisplays(); i++) {
+            SDL_Rect r;
+            if (SDL_GetDisplayBounds(i, &r) == 0) x = std::max(x, r.x + r.w);
+        }
+        x += 100;
+        y = 0;
+    }
+    g_window = SDL_CreateWindow(g_game.title.c_str(), x, y, g_config.windowWidth, g_config.windowHeight, flags);
+    if (!g_window) {
+        fprintf(stderr, "Failed to create window: %s\n", SDL_GetError());
+        std::exit(1);
+    }
+    ui_attach_window(g_window);
+
+    SDL_SysWMinfo wminfo;
+    SDL_VERSION(&wminfo.version);
+    SDL_GetWindowWMInfo(g_window, &wminfo);
+    ultramodern::renderer::WindowHandle handle{};
+    handle.window = wminfo.info.win.window;
+    handle.thread_id = GetCurrentThreadId();
+    return handle;
+}
+
+void update_gfx(ultramodern::gfx_callbacks_t::gfx_data_t) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        input_handle_event(e);
+        if (e.type == SDL_QUIT) { quit(); continue; }
+        if (ui_handle_event(e)) continue;
+        if (e.type == SDL_KEYDOWN) {
+            // F11 or Alt+Enter toggles borderless fullscreen.
+            const SDL_Keysym& k = e.key.keysym;
+            if (k.sym == SDLK_F11 || (k.sym == SDLK_RETURN && (k.mod & KMOD_ALT))) {
+                g_config.fullscreen = !g_config.fullscreen;
+                apply_window_config();
+                save_config();
+            }
+        }
+    }
+    ui_frame();
+}
+
+void poll_input() {} // SDL events are handled in update_gfx
+
+bool get_input(int port, uint16_t* buttons, float* x, float* y) {
+    if (net::active()) return net::get_input(port, buttons, x, y); // both players, sampled per retrace
+    if (port == 0) return sample_local_input(buttons, x, y);
+    return input_get(port, buttons, x, y);
+}
+
+ultramodern::input::connected_device_info_t get_connected_device_info(int port) {
+    if (net::active()) return net::device_info(port);
+    return input_device_info(port);
+}
+
+void gfx_init_callback() {
+    // The renderer and VI thread are up, so the game (or the launcher) can start.
+    if (g_launcher) ui_show_launcher();
+    else start_game();
+}
+
+void error_message_box(const char* msg) {
+    fprintf(stderr, "[%s ERROR] %s\n", g_game.short_name.c_str(), msg);
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, g_game.title.c_str(), msg, g_window);
+}
+
+std::filesystem::path exe_dir() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    return std::filesystem::path(exe).parent_path();
+}
+
+} // namespace
+
+SDL_Window* window() { return g_window; }
+bool headless() { return g_headless; }
+const std::filesystem::path& base_dir() { return g_base; }
+std::string log_prefix() { return "[" + g_game.short_name + "]"; }
+std::atomic<bool> g_quitting = false;
+void quit() { g_quitting = true; ultramodern::quit(); }
+
+bool import_rom(const std::filesystem::path& p, std::string& error) {
+    switch (recomp::select_rom(p, g_game.game_id)) {
+    case recomp::RomValidationError::Good: error.clear(); printf("%s using ROM %s\n", log_prefix().c_str(), p.string().c_str()); return true;
+    case recomp::RomValidationError::FailedToOpen: error = "Couldn't open that file."; break;
+    case recomp::RomValidationError::NotARom: error = "That file isn't an N64 ROM."; break;
+    case recomp::RomValidationError::IncorrectRom: error = "That's a different game's ROM."; break;
+    case recomp::RomValidationError::IncorrectVersion: error = "That's a different version of the game; this needs the USA release."; break;
+    default: error = "That ROM can't be used."; break;
+    }
+    return false;
+}
+
+// librecomp keeps a validated copy of the ROM; failing that, look for one next to the exe.
+bool find_rom() {
+    if (recomp::is_rom_valid(g_game.game_id)) return true;
+    static bool searched = false; // ponytail: looks once; the launcher's drop/path box handles the rest
+    if (searched) return false;
+    searched = true;
+    for (const std::filesystem::path& dir : { exe_dir(), std::filesystem::current_path() }) {
+        for (const std::string& name : g_game.rom_names) {
+            std::string error;
+            if (std::filesystem::exists(dir / name) && import_rom(dir / name, error)) return true;
+        }
+    }
+    return false;
+}
+
+void start_game() {
+    if (!find_rom()) {
+        std::string msg = "Couldn't find the ROM. Put your copy of " + g_game.title + " (USA) next to the program" +
+            (g_game.rom_names.empty() ? std::string(".") : ", named \"" + g_game.rom_names[0] + "\".");
+        ultramodern::error_handling::message_box(msg.c_str());
+        quit();
+        return;
+    }
+    recomp::start_game(g_game.game_id, "");
+    printf("%s game started\n", log_prefix().c_str());
+}
+
+void apply_window_config() {
+    if (!g_window || g_headless) return;
+    bool full = (SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+    if (g_config.display != g_window_display) {
+        g_window_display = g_config.display;
+        if (full) SDL_SetWindowFullscreen(g_window, 0);
+        SDL_SetWindowPosition(g_window, SDL_WINDOWPOS_CENTERED_DISPLAY(g_window_display), SDL_WINDOWPOS_CENTERED_DISPLAY(g_window_display));
+        full = false;
+    }
+    if (full != g_config.fullscreen) SDL_SetWindowFullscreen(g_window, g_config.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+}
+
+int run(const GameInfo& game, recomp::Configuration& cfg, int argc, char** argv) {
+    g_game = game;
+    g_base = std::filesystem::current_path();
+
+    std::string host_port, join_address, record_path;
+    bool host = false;
+    for (int i = 1; i < argc; i++) {
+        std::string a = argv[i];
+        if (a == "--headless") g_headless = true;
+        else if (a == "--play") g_launcher = false;
+        else if (a == "--host") { host = true; if (i + 1 < argc && argv[i + 1][0] != '-') host_port = argv[++i]; }
+        else if (a == "--join" && i + 1 < argc) join_address = argv[++i];
+        else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
+    }
+    if (const char* h = env("HEADLESS"); h && *h == '1') g_headless = true;
+    if (g_headless || host || !join_address.empty()) g_launcher = false;
+
+    load_config(g_base / (g_game.short_name + ".json"));
+    debug_init(record_path);
+    input_init();
+    ui_init();
+    recomp::register_config_path(g_base);
+
+    // --host / --join from the command line: connect now, in the console.
+    if ((host || !join_address.empty()) && g_game.netplay) {
+        std::atomic<bool> never = false;
+        bool ok = host ? net::host(host_port.empty() ? g_config.netplayPort : std::stoi(host_port), never)
+                       : net::join(join_address, never);
+        if (!ok) { fprintf(stderr, "[netplay] %s\n", net::status().c_str()); return 1; }
+        net::begin();
+    } else if (const char* d = env("DETERMINISTIC"); d && *d == '1') {
+        det_start(nullptr);
+        printf("%s deterministic mode\n", log_prefix().c_str());
+    }
+
+    cfg.renderer_callbacks.create_render_context = create_render_context;
+    cfg.audio_callbacks = audio_callbacks();
+    cfg.input_callbacks.poll_input = poll_input;
+    cfg.input_callbacks.get_input = get_input;
+    cfg.input_callbacks.set_rumble = input_set_rumble;
+    cfg.input_callbacks.get_connected_device_info = get_connected_device_info;
+    cfg.gfx_callbacks.create_gfx = create_gfx;
+    cfg.gfx_callbacks.create_window = create_window;
+    cfg.gfx_callbacks.update_gfx = update_gfx;
+    cfg.events_callbacks.gfx_init_callback = gfx_init_callback;
+    cfg.error_handling_callbacks.message_box = error_message_box;
+
+    recomp::start(cfg); // returns when the program exits
+    debug_finish();
+
+    if (g_window) SDL_DestroyWindow(g_window);
+    SDL_Quit();
+    return 0;
+}
+
+} // namespace fe

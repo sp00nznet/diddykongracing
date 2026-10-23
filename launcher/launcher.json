@@ -1,0 +1,17 @@
+{
+  "title": "Diddy Kong Racing",
+  "repo": "sp00nznet/diddykongracing",
+  "accent": "#e8a317",
+  "note": {
+    "windows": "Needs your own USA .z64 of Diddy Kong Racing (v1.1) and a DirectX 12 GPU. The first build takes 30 to 60 minutes and about 8 GB. Git, CMake and the Visual Studio Build Tools (about 3 GB) are installed if they are missing; Windows asks for permission once.",
+    "default": "Windows only for now."
+  },
+  "game": {
+    "name": "Diddy Kong Racing ROM",
+    "files": ["*.z64"]
+  },
+  "setup": {
+    "windows": ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\setup.ps1", "-Yes", "-Game", "{game}"]
+  },
+  "play": "* (recomp).cmd"
+}

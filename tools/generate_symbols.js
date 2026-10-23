@@ -116,7 +116,7 @@ function calculateFunctionSizes(functions) {
 function generateToml(functions) {
     const sectionSize = CODE_ROM_END - MAIN_ROM_START;
 
-    let toml = `# Diddy Kong Racing (US v1.0) - N64Recomp Symbol File\n`;
+    let toml = `# Diddy Kong Racing (US v1.1, v80) - N64Recomp Symbol File\n`;
     toml += `# Auto-generated from DKR decomp project symbol data\n`;
     toml += `# https://github.com/DavidSM64/Diddy-Kong-Racing\n\n`;
 

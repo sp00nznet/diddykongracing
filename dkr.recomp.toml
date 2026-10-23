@@ -1,33 +1,39 @@
-# Diddy Kong Racing - N64Recomp Configuration
-# ROM: US v1.1 (NDYE, SHA1: 6d96743d46f8c0cd0edb0ec5600b003c89b93755)
+# Diddy Kong Racing (USA v1.1, NDYE, SHA1 6d96743d46f8c0cd0edb0ec5600b003c89b93755): N64Recomp config.
+# N64Recomp dkr.recomp.toml writes RecompiledFuncs/ (generated from your ROM, never committed).
 
 [input]
 entrypoint = 0x80000400
 symbols_file_path = "dkr.us.syms.toml"
 rom_file_path = "baserom.us.z64"
 output_func_path = "RecompiledFuncs"
-single_file_output = false
 functions_per_output_file = 50
 
 [patches]
-# N64Recomp's built-in symbol lists automatically handle:
-# - renamed: sinf, cosf, sqrtf, memcpy, memset, bcopy, sprintf, etc.
-# - reimplemented: osCreateThread, osSendMesg, __ll_div, etc.
-# - ignored: all libultra OS/IO/SI/PI/VI/SP functions
-# Only list functions NOT covered by the built-in lists here.
-
+# N64Recomp's built-in lists already rename, replace or drop libultra (osCreateThread, osSendMesg,
+# the SI/PI/VI internals, ...). Only what they miss is listed here.
 renamed = [
-    # Conflicts with MSVC runtime _itoa
-    "_itoa",
-    # Conflicts with MSVC math intrinsic log()
-    "log",
+    "_itoa",  # clashes with the MSVC runtime
+    "log",    # clashes with <math.h>
 ]
-
-# Functions to stub out (replace with empty return)
 stubs = [
-    # Uses cop0 WatchLo register (mtc0 reg, 18) - N64 debug hardware
-    "set_breakpoint",
+    "set_breakpoint",  # writes the COP0 WatchLo debug register
 ]
 
-# Functions to ignore completely
-ignored = []
+# The audio manager sizes each frame as frameSize - osAiGetLength()/4 + a margin, which only works
+# while the length is at most one buffer, as on hardware. The runtime reports the whole host audio
+# queue, so the size went negative and the game queued a garbage buffer. Clamp what it sees to
+# frameSize (0x80119BAC, in samples; the length is in bytes). docs/game-fixes.md
+[[patches.hook]]
+func = "__amHandleFrameMsg"
+before_vram = 0x80002C84
+text = '{ uint32_t max = (uint32_t)MEM_W(0, (gpr)(int32_t)0x80119BAC) * 4; if ((uint32_t)ctx->r2 > max) ctx->r2 = max; }'
+
+# The scheduler's watchdog: a graphics or audio task still running after 10 retraces is taken as
+# a hung RCP, halted and dropped. On a PC a frame can legitimately take that long (RT64 compiling
+# shaders at a scene change), and the late completion then hits a NULL task (crash in
+# __scHandleRSP) or is lost (the game freezes). Keep its counters (gCurRSPTaskCounter,
+# gCurRDPTaskCounter) at zero. docs/game-fixes.md
+[[patches.hook]]
+func = "__scHandleRetrace"
+before_vram = 0x80079C68
+text = 'MEM_W(0, (gpr)(int32_t)0x800DECD4) = 0; MEM_W(0, (gpr)(int32_t)0x800DECD8) = 0;'
