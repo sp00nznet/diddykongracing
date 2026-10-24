@@ -44,11 +44,15 @@ extern std::atomic<bool> g_input_blocked;       // the menu is open: the game se
 
 // netplay.cpp
 namespace net {
-bool host(int port, const std::atomic<bool>& cancel);     // blocks until a player joins (or cancel/error)
+// Blocks until `start` is set (with at least one joiner), `want` players are in, or cancel/error.
+bool host(int port, const std::atomic<bool>& cancel, const std::atomic<bool>& start, int want);
 bool join(const std::string& address, const std::atomic<bool>& cancel);
 void begin();                         // after host/join: shared save folder + deterministic mode
 bool active();
 bool is_host();
+int player();                         // this machine's player number, 0-based
+int players();                        // players in the game
+int connected();                      // host, in the lobby: players connected so far, itself included
 int delay();
 std::string status();                 // the last progress or error message
 bool get_input(int port, uint16_t* buttons, float* x, float* y);

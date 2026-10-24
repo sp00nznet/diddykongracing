@@ -12,8 +12,8 @@ repo or downloaded by it.
 ## Status
 
 **v0.2.0, alpha.** The game boots, plays its attract mode, goes through the menus into Adventure
-mode, and races (Tracks mode, Ancient Lake), with sound and at any resolution. Whole races, the
-other tracks and multiplayer haven't been played through yet.
+mode, races (Tracks mode, Ancient Lake), and races up to 4 players over LAN or the internet, with
+sound and at any resolution. Whole races and the other tracks haven't been played through yet.
 
 | | |
 |---|---|
@@ -21,7 +21,8 @@ other tracks and multiplayer haven't been played through yet.
 | Menus: character select, game select, initials | yes |
 | Adventure mode: hub island, Taj | yes |
 | Tracks mode: track and vehicle select, countdown, racing with HUD | yes (Ancient Lake) |
-| Full races, other tracks, boss races, multiplayer | not tested yet ([ROADMAP](ROADMAP.md)) |
+| Online / LAN multiplayer, 2 to 4 players (split screen on every machine) | yes: 4 players raced Ancient Lake with no desync (tested as 4 instances on one PC) |
+| Full races, other tracks, boss races, local split screen with several pads | not tested yet ([ROADMAP](ROADMAP.md)) |
 | Graphics: RT64 (D3D12), any resolution, MSAA, texture packs | yes |
 | Widescreen (`aspectRatio: Expand`): the 3D fills the screen, the HUD stays in the middle 4:3 | yes |
 | Sound and music | yes |
@@ -40,8 +41,8 @@ What it took, and why each fix sits where it does: [docs/game-fixes.md](docs/gam
 | Intro | Attract mode | Attract mode |
 | ![Title screen](docs/screenshots/title.png) | ![Character select](docs/screenshots/character-select.png) | ![Adventure: Taj arrives](docs/screenshots/taj.png) |
 | Title | Character select | Adventure: Taj |
-| ![Ancient Lake: the grid](docs/screenshots/race-start.png) | ![Ancient Lake: GO!](docs/screenshots/race.png) | ![Adventure: the hub](docs/screenshots/hub.png) |
-| Ancient Lake, on the grid | Ancient Lake, GO! | Adventure: the hub |
+| ![Ancient Lake: the grid](docs/screenshots/race-start.png) | ![Ancient Lake: GO!](docs/screenshots/race.png) | ![Four players over the network](docs/screenshots/netplay-4p.png) |
+| Ancient Lake, on the grid | Ancient Lake, GO! | 4-player netplay |
 
 ![Ancient Lake in widescreen](docs/screenshots/widescreen.png)
 
@@ -111,9 +112,9 @@ the folder path is too long; move the repo somewhere shorter.
 
 ## Usage
 
-The exe opens a launcher: **Play**, **Host a game** / **Join** (2-player netplay, untested with
-DKR), and **Settings** (controls, graphics, sound). In the game, **Esc** or the controller's
-**Back** button opens the menu. `--play` skips the launcher. F11 or Alt+Enter toggles fullscreen.
+The exe opens a launcher: **Play**, **Host a game** / **Join** (netplay, below), and **Settings**
+(controls, graphics, sound, netplay). In the game, **Esc** or the controller's **Back** button opens
+the menu. `--play` skips the launcher. F11 or Alt+Enter toggles fullscreen.
 
 | N64 | Keyboard | Controller |
 |---|---|---|
@@ -129,6 +130,33 @@ DKR), and **Settings** (controls, graphics, sound). In the game, **Esc** or the 
 Settings live in `dkr.json` in the working directory (written on first run): resolution, MSAA,
 widescreen (`aspectRatio: Expand`), refresh rate, texture packs from `texture-packs\`, volume,
 deadzone, per-player devices and bindings.
+
+### Online and LAN multiplayer (2 to 4 players)
+
+Every machine runs the whole game and they exchange only controller inputs, in lockstep, so each
+player gets a full-quality render of the N64's split screen.
+
+1. The host picks **Host a game**. The launcher lists this PC's addresses to give the others.
+2. Each other player types one of them and picks **Join**. They're players 2, 3 and 4 in the order
+   they join.
+3. When everyone's in, the host picks **Start with N players**. The game starts with the host's
+   save on every machine, then pick your characters and a track as usual (Tracks mode).
+
+From the command line (the host starts once that many are in):
+
+```
+DKRRecompiled.exe --host --players 4        # player 1; UDP port 7777, --host 7800 for another
+DKRRecompiled.exe --join 100.64.1.2         # players 2 to 4; :port if not 7777
+```
+
+- **Internet:** easiest over [Tailscale](https://tailscale.com) (give the others the host's `100.x`
+  address), with no port forwarding. Without it, the host forwards UDP 7777.
+- **Latency:** inputs go through the host. `netplay.inputDelay` in `dkr.json` (default 2 frames,
+  about 33 ms) hides that much round trip to the host; raise it for long distances.
+- **Same build everywhere.** A mismatch shows as `[netplay] DESYNC at retrace N with player P` in the
+  console, checked once a second.
+- One player per machine. Netplay plays from its own `netplay\` folder (ROM copy and the shared
+  save), so your normal save is never touched.
 
 For testing and debugging, the exe takes `--headless` (the window sits off every monitor and is
 still rendered), `--record out.mp4` (30 fps of the window piped to `ffmpeg`, which must be on

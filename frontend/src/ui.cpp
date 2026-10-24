@@ -123,6 +123,7 @@ char g_join_address[256] = "";
 
 std::thread g_net_thread;
 std::atomic<bool> g_net_cancel = false;
+std::atomic<bool> g_net_start = false;
 std::atomic<int> g_net_result = 0; // 0 connecting, 1 connected, -1 failed
 bool g_net_hosting = false;
 std::vector<std::string> g_addresses;
@@ -177,11 +178,12 @@ bool combo(const char* label, std::string& value, std::initializer_list<std::pai
 void start_netplay(bool hosting) {
     g_net_hosting = hosting;
     g_net_cancel = false;
+    g_net_start = false;
     g_net_result = 0;
     if (hosting) g_addresses = net::local_addresses();
     std::string address = g_join_address;
     g_net_thread = std::thread([hosting, address] {
-        bool ok = hosting ? net::host(g_config.netplayPort, g_net_cancel) : net::join(address, g_net_cancel);
+        bool ok = hosting ? net::host(g_config.netplayPort, g_net_cancel, g_net_start, g_game.players) : net::join(address, g_net_cancel);
         g_net_result = ok ? 1 : -1;
     });
     show(Screen::Connecting);
@@ -211,7 +213,7 @@ void launcher() {
     if (wide_button("Play")) { show(Screen::Hidden); start_game(); }
     if (g_game.netplay) {
         ImGui::Spacing();
-        ImGui::SeparatorText("Netplay (2 players)");
+        ImGui::SeparatorText(("Netplay (up to " + std::to_string(std::clamp(g_game.players, 2, 4)) + " players)").c_str());
         if (wide_button("Host a game")) start_netplay(true);
         ImGui::SetNextItemWidth(-ImGui::CalcTextSize("Join").x - ImGui::GetStyle().FramePadding.x * 2 - ImGui::GetStyle().ItemSpacing.x);
         bool enter = ImGui::InputTextWithHint("##join", "host address (e.g. 100.64.0.5)", g_join_address, sizeof(g_join_address),
@@ -246,11 +248,14 @@ void connecting() {
     ImGui::TextWrapped("%s", net::status().c_str());
     if (g_net_hosting && g_net_result == 0) {
         ImGui::Spacing();
-        ImGui::TextWrapped("Player 2 joins one of these addresses (the 100.x one over Tailscale), UDP port %d:", g_config.netplayPort);
+        ImGui::TextWrapped("The others join one of these addresses (the 100.x one over Tailscale), UDP port %d:", g_config.netplayPort);
         for (const std::string& a : g_addresses) ImGui::BulletText("%s", a.c_str());
     }
     ImGui::Spacing();
     focus_first();
+    if (g_net_hosting && g_net_result == 0 && net::connected() > 1 && !g_net_start) {
+        if (wide_button(("Start with " + std::to_string(net::connected()) + " players").c_str())) g_net_start = true;
+    }
     if (g_net_result == 0) {
         if (wide_button("Cancel")) g_net_cancel = true;
     } else if (wide_button("Back")) {
@@ -400,7 +405,7 @@ void menu() {
     panel_begin("##menu", 18);
     heading(g_game.title, 1.2f);
     if (net::active()) {
-        ImGui::TextDisabled("Netplay: you are player %d, %d frames delay", net::is_host() ? 1 : 2, net::delay());
+        ImGui::TextDisabled("Netplay: you are player %d of %d, %d frames delay", net::player() + 1, net::players(), net::delay());
         ImGui::TextDisabled("The game keeps running while this menu is open.");
     }
     focus_first();

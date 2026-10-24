@@ -5,6 +5,12 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Online and LAN multiplayer for 2 to 4 players: deterministic lockstep over UDP with the host as
+  the hub, a lobby with a **Start with N players** button, `--host --players N` / `--join`, and a
+  desync check every second. DKR's thread structs are masked out of the RAM hash.
+- Hero GIF in the README.
+
 ## [0.2.0] - 2026-10-23
 
 Rebuilt on current N64Recomp, N64ModernRuntime and RT64 (sp00nznet's forks), with the shared

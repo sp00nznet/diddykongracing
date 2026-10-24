@@ -88,6 +88,11 @@ int main(int argc, char** argv) {
     info.rom_names = { "baserom.us.z64", "Diddy Kong Racing (U) [!].z64", "dkr.z64" };
     info.players = 4;
     info.env_prefix = "DKR_";
+    info.netplay = true;
+    // ponytail: the six OSThreads DKR creates at boot sit at fixed addresses (found by diffing RAM
+    // dumps of two deterministic runs); track osCreateThread if that ever changes.
+    info.det_mask_words = { 0x00116550, 0x0011FD00, 0x0011FEB0, 0x001218B0, 0x00129BC0, 0x0012B0D0 };
+    info.det_ram_end = 0x00400000; // DKR runs in 4 MB
     printf("Diddy Kong Racing Recompiled %s\n", DKR_VERSION);
     return fe::run(info, cfg, argc, argv);
 }

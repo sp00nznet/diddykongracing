@@ -191,6 +191,7 @@ int run(const GameInfo& game, recomp::Configuration& cfg, int argc, char** argv)
     g_base = std::filesystem::current_path();
 
     std::string host_port, join_address, record_path;
+    int want_players = 2;
     bool host = false;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -199,6 +200,7 @@ int run(const GameInfo& game, recomp::Configuration& cfg, int argc, char** argv)
         else if (a == "--host") { host = true; if (i + 1 < argc && argv[i + 1][0] != '-') host_port = argv[++i]; }
         else if (a == "--join" && i + 1 < argc) join_address = argv[++i];
         else if (a == "--record" && i + 1 < argc) record_path = argv[++i];
+        else if (a == "--players" && i + 1 < argc) want_players = std::atoi(argv[++i]);
     }
     if (const char* h = env("HEADLESS"); h && *h == '1') g_headless = true;
     if (g_headless || host || !join_address.empty()) g_launcher = false;
@@ -212,7 +214,7 @@ int run(const GameInfo& game, recomp::Configuration& cfg, int argc, char** argv)
     // --host / --join from the command line: connect now, in the console.
     if ((host || !join_address.empty()) && g_game.netplay) {
         std::atomic<bool> never = false;
-        bool ok = host ? net::host(host_port.empty() ? g_config.netplayPort : std::stoi(host_port), never)
+        bool ok = host ? net::host(host_port.empty() ? g_config.netplayPort : std::stoi(host_port), never, never, want_players)
                        : net::join(join_address, never);
         if (!ok) { fprintf(stderr, "[netplay] %s\n", net::status().c_str()); return 1; }
         net::begin();
