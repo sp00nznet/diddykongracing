@@ -5,6 +5,8 @@ versions: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-24
+
 ### Added
 - Online and LAN multiplayer for 2 to 4 players: deterministic lockstep over UDP with the host as
   the hub, a lobby with a **Start with N players** button, `--host --players N` / `--join`, and a

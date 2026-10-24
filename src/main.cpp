@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
     }
 
     recomp::Configuration cfg{};
-    cfg.project_version = { 0, 2, 0, "-alpha" };
+    cfg.project_version = { 0, 3, 0, "-alpha" };
     cfg.rsp_callbacks.get_rsp_microcode = get_rsp_microcode;
     cfg.threads_callbacks.get_game_thread_name = thread_name;
     // DKR frees and reloads assets right after submitting a frame, and rebuilds vertices and

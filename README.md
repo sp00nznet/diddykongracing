@@ -11,9 +11,9 @@ repo or downloaded by it.
 
 ## Status
 
-**v0.2.0, alpha.** The game boots, plays its attract mode, goes through the menus into Adventure
+**v0.3.0, alpha.** The game boots, plays its attract mode, goes through the menus into Adventure
 mode, races (Tracks mode, Ancient Lake), and races up to 4 players over LAN or the internet, with
-sound and at any resolution. Whole races and the other tracks haven't been played through yet.
+sound, at any resolution and with GameShark cheats. Whole races and the other tracks haven't been played through yet.
 
 | | |
 |---|---|
