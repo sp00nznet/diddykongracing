@@ -1,5 +1,9 @@
 # Diddy Kong Racing Recompiled
 
+<p align="center">
+  <img src="docs/screenshots/hero.gif" alt="Timber racing Ancient Lake in the recompiled build: the GO!, taking first place, bananas and item balloons" width="400">
+</p>
+
 A native Windows port of **Diddy Kong Racing** (N64, 1997), made by statically recompiling the
 game's own code with [N64Recomp](https://github.com/N64Recomp/N64Recomp) and drawing it with
 [RT64](https://github.com/rt64/rt64). You supply your own ROM; nothing from the game is in this
