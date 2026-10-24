@@ -171,6 +171,11 @@ foreach ($d in $dlls.Keys) {
     if (-not (Test-Path -LiteralPath (Join-Path $bin $d))) { Copy-Item -LiteralPath (Join-Path $Root $dlls[$d]) -Destination $bin }
     if (-not (Test-Path -LiteralPath (Join-Path $bin $d))) { Stop-Setup "$d is missing next to the game, and copying it failed." }
 }
+# Cheats (Settings > Cheats) read a Project64 .cht code list; use Project64's if it's installed.
+$cht = Join-Path $bin "cheats.cht"
+$pj64 = Get-ChildItem "${env:ProgramFiles(x86)}\Project64*\Config\Cheats", "$env:ProgramFiles\Project64*\Config\Cheats" -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName "Diddy Kong Racing (U) (M2) (V1.1).cht" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if (-not (Test-Path -LiteralPath $cht) -and $pj64) { Copy-Item -LiteralPath $pj64 -Destination $cht }
 $launcher = Join-Path $Root "$Title (recomp).cmd"
 "@echo off`r`ncd /d `"%~dp0`"`r`nstart `"`" `"build\RelWithDebInfo\DKRRecompiled.exe`" %*`r`n" | Out-File $launcher -Encoding ascii
 Write-Host "  $Title (recomp).cmd"

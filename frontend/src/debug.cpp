@@ -31,8 +31,6 @@
 namespace fe {
 namespace {
 
-uint8_t* g_rdram = nullptr;
-
 const char* env(const char* name) { return std::getenv((g_game.env_prefix + name).c_str()); }
 
 // The linker map names every recompiled function; the PDB doesn't (they're one big static lib).
@@ -233,8 +231,6 @@ void record(std::string path) {
 }
 
 } // namespace
-
-void debug_set_rdram(uint8_t* rdram) { g_rdram = rdram; }
 
 void debug_finish() {
     if (FILE* f = g_ffmpeg) { g_ffmpeg = nullptr; Sleep(50); _pclose(f); }

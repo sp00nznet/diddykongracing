@@ -10,6 +10,8 @@ versions: [SemVer](https://semver.org/).
   the hub, a lobby with a **Start with N players** button, `--host --players N` / `--join`, and a
   desync check every second. DKR's thread structs are masked out of the RAM hash.
 - Hero GIF in the README.
+- GameShark cheats (Settings > Cheats) from a Project64 `.cht` list next to the exe, ported from
+  Racer's frontend. Setup copies Project64's DKR list when it's installed. Off during netplay.
 
 ## [0.2.0] - 2026-10-23
 

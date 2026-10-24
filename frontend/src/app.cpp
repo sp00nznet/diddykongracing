@@ -96,7 +96,7 @@ void update_gfx(ultramodern::gfx_callbacks_t::gfx_data_t) {
     ui_frame();
 }
 
-void poll_input() {} // SDL events are handled in update_gfx
+void poll_input() { cheats_apply(); } // once per frame on the game thread; SDL events are handled in update_gfx
 
 bool get_input(int port, uint16_t* buttons, float* x, float* y) {
     if (net::active()) return net::get_input(port, buttons, x, y); // both players, sampled per retrace
@@ -206,6 +206,7 @@ int run(const GameInfo& game, recomp::Configuration& cfg, int argc, char** argv)
     if (g_headless || host || !join_address.empty()) g_launcher = false;
 
     load_config(g_base / (g_game.short_name + ".json"));
+    cheats_load();
     debug_init(record_path);
     input_init();
     ui_init();

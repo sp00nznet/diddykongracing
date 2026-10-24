@@ -5,6 +5,7 @@
 add_library(n64frontend STATIC
     src/app.cpp
     src/audio.cpp
+    src/cheats.cpp
     src/config.cpp
     src/debug.cpp
     src/det.cpp

@@ -14,8 +14,8 @@
 #include "internal.hpp"
 
 namespace fe {
-namespace {
 uint8_t* g_rdram = nullptr;
+namespace {
 FILE* g_hashlog = nullptr;
 long long g_dump_frame = -1;
 bool g_hash_blocks = false;
@@ -56,7 +56,7 @@ void on_retrace(uint64_t retrace) {
 }
 } // namespace
 
-void set_rdram(uint8_t* rdram) { g_rdram = rdram; debug_set_rdram(rdram); }
+void set_rdram(uint8_t* rdram) { g_rdram = rdram; }
 
 // FNV-1a over game RAM, skipping the per-run fields.
 uint64_t det_hash_game_ram() {

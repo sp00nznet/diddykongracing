@@ -101,6 +101,8 @@ void load_config(const std::filesystem::path& path) {
     read(np, "port", c.netplayPort);
     read(np, "address", c.netplayAddress);
 
+    read(j, "cheats", c.cheats);
+
     const json in = j.value("input", json::object());
     read(in, "deadzone", c.deadzone);
     if (in.contains("players") && in["players"].is_array()) {
@@ -146,6 +148,7 @@ void save_config() {
     };
     out["audio"] = { { "volume", c.volume } };
     out["netplay"] = { { "inputDelay", c.netplayInputDelay }, { "port", c.netplayPort }, { "address", c.netplayAddress } };
+    out["cheats"] = c.cheats;
     if (std::ofstream f{ g_path }) {
         f << out.dump(4) << "\n";
     }

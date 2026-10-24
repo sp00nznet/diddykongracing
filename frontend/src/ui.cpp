@@ -381,6 +381,28 @@ void netplay_tab() {
     g_config.netplayPort = std::clamp(g_config.netplayPort, 1, 65535);
 }
 
+void cheats_tab() {
+    auto list = cheats_list();
+    if (list.empty()) {
+        ImGui::TextWrapped("No cheats.cht next to the game. Put a GameShark code list there in Project64's "
+                           ".cht format (Project64 ships one per game in Config\\Cheats), then restart.");
+        return;
+    }
+    if (net::active()) ImGui::TextDisabled("Cheats are off during netplay.");
+    for (auto& c : list) {
+        bool on = c.enabled;
+        if (ImGui::Checkbox(c.name.c_str(), &on)) cheats_set(c.name, on);
+        if (!c.note.empty() && ImGui::IsItemHovered()) {
+            ImGui::BeginTooltip();
+            ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28); // notes are long single lines
+            ImGui::TextUnformatted(c.note.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::EndTooltip();
+        }
+    }
+    ImGui::TextDisabled("Turning a cheat off doesn't undo what it already changed.");
+}
+
 void settings() {
     panel_begin("##settings", 36);
     heading("Settings", 1.4f);
@@ -393,6 +415,7 @@ void settings() {
         if (tab("Graphics")) { graphics_tab(); ImGui::EndTabItem(); }
         if (tab("Sound")) { sound_tab(); ImGui::EndTabItem(); }
         if (g_game.netplay && tab("Netplay")) { netplay_tab(); ImGui::EndTabItem(); }
+        if (tab("Cheats")) { cheats_tab(); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
         g_open_tab.clear();
     }
@@ -550,7 +573,7 @@ void ui_frame() {
     if (now - last < 16) return;
     last = now;
 
-    // <prefix>UI=launcher|menu|settings[:Controls|Graphics|Netplay] opens that screen once the game
+    // <prefix>UI=launcher|menu|settings[:Controls|Graphics|Netplay|Cheats] opens that screen once the game
     // (or launcher) is up: for screenshots and checks without anyone at the keyboard.
     static std::string debug_screen = [] { const char* e = std::getenv((g_game.env_prefix + "UI").c_str()); return std::string(e ? e : ""); }();
     if (!debug_screen.empty() && (ultramodern::is_game_started() || g_screen == Screen::Launcher)) {

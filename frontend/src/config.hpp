@@ -42,6 +42,9 @@ struct Config {
     int netplayPort = 7777;                        // UDP port the host listens on
     std::string netplayAddress;                    // last address joined
 
+    // Cheats enabled, by their name in cheats.cht
+    std::vector<std::string> cheats;
+
     // Input
     double deadzone = 0.15;
     std::array<PlayerConfig, 4> players{};

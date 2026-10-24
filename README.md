@@ -129,7 +129,7 @@ the menu. `--play` skips the launcher. F11 or Alt+Enter toggles fullscreen.
 
 Settings live in `dkr.json` in the working directory (written on first run): resolution, MSAA,
 widescreen (`aspectRatio: Expand`), refresh rate, texture packs from `texture-packs\`, volume,
-deadzone, per-player devices and bindings.
+deadzone, per-player devices and bindings, enabled cheats.
 
 ### Online and LAN multiplayer (2 to 4 players)
 
@@ -157,6 +157,16 @@ DKRRecompiled.exe --join 100.64.1.2         # players 2 to 4; :port if not 7777
   console, checked once a second.
 - One player per machine. Netplay plays from its own `netplay\` folder (ROM copy and the shared
   save), so your normal save is never touched.
+
+### Cheats
+
+**Settings > Cheats** lists GameShark codes from `cheats.cht` next to the exe, in Project64's `.cht`
+format; tick a code to turn it on (it's saved in `dkr.json`). Setup copies Project64's list for
+this ROM there if Project64 is installed (`Config\Cheats\Diddy Kong Racing (U) (M2) (V1.1).cht`);
+any list in that format works. It has all 65 codes, including Enable All Cheats (every Magic Code
+unlocked under Options), all 50 Bananas per track and frozen bosses. Codes are applied once a
+frame, like the real GameShark (types 80/81, A0/A1, D0-D3, F0/F1 and 50). Netplay ignores cheats
+so the machines stay in sync.
 
 For testing and debugging, the exe takes `--headless` (the window sits off every monitor and is
 still rendered), `--record out.mp4` (30 fps of the window piped to `ffmpeg`, which must be on
