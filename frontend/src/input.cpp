@@ -239,19 +239,19 @@ bool input_get(int port, uint16_t* buttons, float* x, float* y) {
     return true;
 }
 
-// Player 1's local input, plus <prefix>AUTOPRESS="28:1000,31.5:8000": hold those N64 buttons for
-// 0.25 s at each time (seconds since the first poll; frames/60 in deterministic mode), for
+// Player 1's local input, plus <prefix>AUTOPRESS="28:1000,31.5:8000,33:20000": hold those N64 buttons
+// (or stick directions, the bits above 16) for 0.25 s at each time (seconds since the first poll; frames/60 in deterministic mode), for
 // scripted test runs. Netplay samples this once per retrace.
 bool sample_local_input(uint16_t* buttons, float* x, float* y) {
     bool connected = input_get(0, buttons, x, y);
-    static const std::vector<std::pair<double, uint16_t>> script = [] {
-        std::vector<std::pair<double, uint16_t>> s;
+    static const std::vector<std::pair<double, uint32_t>> script = [] {
+        std::vector<std::pair<double, uint32_t>> s;
         if (const char* e = std::getenv((g_game.env_prefix + "AUTOPRESS").c_str())) {
             for (const char* p = e; *p; ) {
                 char* end;
                 double t = strtod(p, &end);
                 if (*end != ':') break;
-                uint16_t b = (uint16_t)strtoul(end + 1, &end, 16);
+                uint32_t b = (uint32_t)strtoul(end + 1, &end, 16);
                 s.push_back({ t, b });
                 p = (*end == ',') ? end + 1 : end;
             }
@@ -262,7 +262,14 @@ bool sample_local_input(uint16_t* buttons, float* x, float* y) {
     static const uint64_t start_ticks = SDL_GetTicks64();
     double now = det_enabled() ? det_frame() / 60.0 : (SDL_GetTicks64() - start_ticks) / 1000.0;
     for (auto& [t, b] : script) {
-        if (now >= t && now < t + 0.25) *buttons |= b;
+        if (now >= t && now < t + 0.25) {
+            *buttons |= uint16_t(b);
+            // Bits above the N64's 16 push the stick: 10000 up, 20000 down, 40000 left, 80000 right.
+            if (b & 0x10000) *y = 1.0f;
+            if (b & 0x20000) *y = -1.0f;
+            if (b & 0x40000) *x = -1.0f;
+            if (b & 0x80000) *x = 1.0f;
+        }
     }
     return connected;
 }

@@ -17,9 +17,9 @@ frontend from Racer. The game now renders through RT64 and plays from boot into 
   rebinding, `dkr.json` settings, F11 fullscreen.
 - `Setup.cmd` quick start: checks and offers to install the prerequisites, finds your ROM, fetches
   the toolkits, recompiles and builds, and leaves `Diddy Kong Racing (recomp).cmd`.
-- `--headless`, `--record out.mp4`, and the `DKR_QUIT_AFTER`, `DKR_SHOT`, `DKR_AUTOPRESS`,
-  `DKR_AUDIODUMP`, `DKR_STACKDUMP`, `DKR_PEEK`, `DKR_WATCH` switches for unattended runs and
-  debugging; crash reports name the recompiled function.
+- `--headless`, `--record out.mp4`, and the `DKR_QUIT_AFTER`, `DKR_SHOT`, `DKR_AUTOPRESS` (buttons
+  and stick), `DKR_AUDIODUMP`, `DKR_STACKDUMP`, `DKR_PEEK` and `DKR_WATCH` switches for unattended
+  runs and debugging; crash reports name the recompiled function.
 - `launcher/launcher.json` and the installer workflow for recomp-launcher.
 - Docs: architecture, building, game fixes. LICENSE (MIT), CONTRIBUTING, ROADMAP.
 

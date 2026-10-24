@@ -2,9 +2,10 @@
 
 ## Next
 
-- **Play it through.** Races (Adventure and Tracks mode), boss races, the trophy races and
-  multiplayer (2 to 4 players, split screen) haven't been played yet. Scripted headless runs that
-  reach a race and finish it, kept as a regression check.
+- **Play it through.** A Tracks-mode race starts and drives (Ancient Lake); whole races, the other
+  tracks, Adventure's doors and races, boss races, trophy races and multiplayer (2 to 4 players,
+  split screen) haven't been played yet. Scripted headless runs that finish a race, kept as a
+  regression check.
 - **Controller pak.** DKR stores ghosts and time-trial data on a pak and is told none is plugged
   in. Emulate one (a file per player) in N64ModernRuntime, which Rampage needs too.
 - **Saves.** EEPROM data is written; check that Adventure progress and times reload.

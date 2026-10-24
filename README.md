@@ -7,16 +7,17 @@ repo or downloaded by it.
 
 ## Status
 
-**v0.2.0, alpha.** The game boots, plays its attract mode, and goes through the menus into
-Adventure mode, with sound and at any resolution. Races beyond the first steps of Adventure haven't
-been played through yet.
+**v0.2.0, alpha.** The game boots, plays its attract mode, goes through the menus into Adventure
+mode, and races (Tracks mode, Ancient Lake), with sound and at any resolution. Whole races, the
+other tracks and multiplayer haven't been played through yet.
 
 | | |
 |---|---|
 | Intro, attract mode, title | yes |
 | Menus: character select, game select, initials | yes |
 | Adventure mode: hub island, Taj | yes |
-| Races, Tracks mode, multiplayer | not tested yet ([ROADMAP](ROADMAP.md)) |
+| Tracks mode: track and vehicle select, countdown, racing with HUD | yes (Ancient Lake) |
+| Full races, other tracks, boss races, multiplayer | not tested yet ([ROADMAP](ROADMAP.md)) |
 | Graphics: RT64 (D3D12), any resolution, MSAA, widescreen option, texture packs | yes |
 | Sound and music | yes |
 | Saves (EEPROM: Adventure progress, times) | written to `saves\dkr.us.bin`; reloading progress not checked yet |
@@ -34,6 +35,8 @@ What it took, and why each fix sits where it does: [docs/game-fixes.md](docs/gam
 | Intro | Attract mode | Attract mode |
 | ![Title screen](docs/screenshots/title.png) | ![Character select](docs/screenshots/character-select.png) | ![Adventure: Taj arrives](docs/screenshots/taj.png) |
 | Title | Character select | Adventure: Taj |
+| ![Ancient Lake: the grid](docs/screenshots/race-start.png) | ![Ancient Lake: GO!](docs/screenshots/race.png) | ![Adventure: the hub](docs/screenshots/hub.png) |
+| Ancient Lake, on the grid | Ancient Lake, GO! | Adventure: the hub |
 
 All captured from the real build with `--headless --record` (see [Usage](#usage)), 2026-10-23.
 
@@ -126,18 +129,19 @@ still rendered), `--record out.mp4` (30 fps of the window piped to `ffmpeg`, whi
 |---|---|
 | `DKR_QUIT_AFTER=60` | quits after that many seconds |
 | `DKR_SHOT=10:a.bmp,30:b.bmp` | saves the window to those files at those times (seconds) |
-| `DKR_AUTOPRESS=4:1000,7:8000` | holds N64 buttons (hex: `1000` Start, `8000` A, `4000` B, `2000` Z, `0010` R) for 0.25 s at those times |
+| `DKR_AUTOPRESS=4:1000,7:8000` | holds N64 buttons (hex: `1000` Start, `8000` A, `4000` B, `2000` Z, `0010` R) or the stick (`10000` up, `20000` down, `40000` left, `80000` right) for 0.25 s at those times |
 | `DKR_AUDIODUMP=out.raw` | also writes the sound as raw 16-bit stereo |
 | `DKR_STACKDUMP=20` | prints every thread's stack at that time, for hangs |
 | `DKR_PEEK=0x801217E0,...` | prints those RDRAM words with a stack dump or crash |
 | `DKR_WATCH=0x80121A54@5` | after 5 s, traps the first write to that RDRAM word and prints who did it |
 | `DKR_DISPLAY=1` | opens on that monitor |
 
-A run that goes from boot to the Adventure hub and records it:
+A run that goes from boot through Tracks mode to the start of a race on Ancient Lake and records
+it (times are seconds after start; they drift by a second or two between machines):
 
 ```
-set DKR_AUTOPRESS=4:1000,7:1000,10:8000,13:8000,16:8000,19:8000,22:1000,25:1000,28:8000,31:8000,34:8000,37:1000,39:8000
-set DKR_QUIT_AFTER=90
+set DKR_AUTOPRESS=4:1000,7:1000,10:8000,13:8000,16:8000,19:8000,22:1000,25:1000,28:8000,31:8000,34:8000,36.5:20000,37:20000,38:8000,41:8000,44:8000,47:8000,50:8000,53:8000,54:8000,55:8000
+set DKR_QUIT_AFTER=70
 build\RelWithDebInfo\DKRRecompiled.exe --headless --record run.mp4
 ```
 
