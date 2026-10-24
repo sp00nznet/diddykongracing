@@ -19,7 +19,8 @@
 
 - A conformance check: headless runs to fixed points (title, character select, the hub, a race
   start) compared against stored frame hashes, run on netlab.
-- Widescreen that also widens DKR's HUD and 2D layers, and frame interpolation for 60 fps.
+- Widescreen HUD: the 3D already fills 16:9; the HUD and menus stay in the middle 4:3. Frame
+  interpolation for 60 fps.
 - An N64ModernRuntime shutdown order that stops game threads before RDRAM is freed, then drop
   the quit-time fault guard in `frontend/src/debug.cpp`; the same for RT64's destructor, which
   `frontend/src/rt64_context.cpp` currently skips.

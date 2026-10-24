@@ -18,7 +18,8 @@ other tracks and multiplayer haven't been played through yet.
 | Adventure mode: hub island, Taj | yes |
 | Tracks mode: track and vehicle select, countdown, racing with HUD | yes (Ancient Lake) |
 | Full races, other tracks, boss races, multiplayer | not tested yet ([ROADMAP](ROADMAP.md)) |
-| Graphics: RT64 (D3D12), any resolution, MSAA, widescreen option, texture packs | yes |
+| Graphics: RT64 (D3D12), any resolution, MSAA, texture packs | yes |
+| Widescreen (`aspectRatio: Expand`): the 3D fills the screen, the HUD stays in the middle 4:3 | yes |
 | Sound and music | yes |
 | Saves (EEPROM: Adventure progress, times) | written to `saves\dkr.us.bin`; reloading progress not checked yet |
 | Controller pak (ghosts) | no: the game is told no pak is plugged in |
@@ -37,6 +38,10 @@ What it took, and why each fix sits where it does: [docs/game-fixes.md](docs/gam
 | Title | Character select | Adventure: Taj |
 | ![Ancient Lake: the grid](docs/screenshots/race-start.png) | ![Ancient Lake: GO!](docs/screenshots/race.png) | ![Adventure: the hub](docs/screenshots/hub.png) |
 | Ancient Lake, on the grid | Ancient Lake, GO! | Adventure: the hub |
+
+![Ancient Lake in widescreen](docs/screenshots/widescreen.png)
+
+*Widescreen (`"aspectRatio": "Expand"` in `dkr.json`) at 1920×1080.*
 
 All captured from the real build with `--headless --record` (see [Usage](#usage)), 2026-10-23.
 
